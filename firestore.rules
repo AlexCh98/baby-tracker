@@ -1,0 +1,13 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Solo estos emails pueden leer y escribir. Cámbialos por los vuestros (en minúsculas).
+    function esFamilia() {
+      return request.auth != null
+        && request.auth.token.email in ['TU_EMAIL@gmail.com', 'EMAIL_PAREJA@gmail.com'];
+    }
+    match /bebes/{document=**} {
+      allow read, write: if esFamilia();
+    }
+  }
+}
