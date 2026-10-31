@@ -44,7 +44,7 @@ async function createFirebaseStore(cfg) {
     reset: (e) => A.sendPasswordResetEmail(auth, e),
     logout: () => A.signOut(auth),
 
-    watchBaby: (cb, err) => F.onSnapshot(babyRef, (s) => cb(s.exists() ? s.data() : null), err),
+    watchBaby: (cb, err) => F.onSnapshot(babyRef, { includeMetadataChanges: true }, (s) => cb(s.exists() ? s.data() : null, s.metadata.fromCache), err),
     saveBaby: (d) => F.setDoc(babyRef, d, { merge: true }),
 
     watchState: (cb, err) => F.onSnapshot(stateRef, (s) => cb(s.exists() ? s.data() : {}), err),
@@ -93,7 +93,7 @@ function createDemoStore() {
     mode: 'demo',
     onUser(cb) { cb({ email: 'demo' }); return () => {}; },
     login: async () => {}, register: async () => {}, reset: async () => {}, logout: async () => {},
-    watchBaby: (cb) => sub(() => cb(data.baby ? copy(data.baby) : null)),
+    watchBaby: (cb) => sub(() => cb(data.baby ? copy(data.baby) : null, false)),
     saveBaby: async (d) => { data.baby = { ...(data.baby || {}), ...d }; save(); },
     watchState: (cb) => sub(() => cb(copy(data.state))),
     saveState: async (p) => { data.state = { ...data.state, ...p }; save(); },

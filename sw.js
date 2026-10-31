@@ -1,6 +1,6 @@
 // Service worker: guarda la app para que abra sin conexión.
 // Sube el número de versión al publicar cambios para que los móviles se actualicen.
-const CACHE = 'monitor-bebe-v2';
+const CACHE = 'monitor-bebe-v3';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './store.js', './config.js', './who.js',
   './manifest.webmanifest', './lib/firebase-app.js', './lib/firebase-auth.js', './lib/firebase-firestore.js',

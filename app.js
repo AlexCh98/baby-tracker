@@ -137,6 +137,8 @@ async function start() {
     unsubs = [];
     S.user = u;
     S.error = null;
+    S.baby = null; S.active = {}; S.events = []; S.measures = []; S.loaded = false;
+    S.access = !u ? null : S.store.mode === 'demo' || wasVerified(u.email) ? 'ok' : 'checking';
     if (u) subscribe();
     render();
   });
@@ -148,16 +150,36 @@ async function start() {
 
 function subscribe() {
   const err = (e) => {
+    if (e && e.code === 'permission-denied') return denyAccess();
     S.error = e && e.code === 'permission-denied'
       ? `Tu cuenta (${S.user?.email}) no tiene acceso. Añade este email en las reglas de Firestore.`
       : `Error de sincronización: ${e?.message || e}`;
     render();
   };
   const since = dayStart(Date.now()) - 45 * DAY;
-  unsubs.push(S.store.watchBaby((b) => { S.baby = b; render(); }, err));
+  unsubs.push(S.store.watchBaby((b, fromCache) => {
+    S.baby = b;
+    if (!fromCache && S.access !== 'ok') { S.access = 'ok'; markVerified(S.user.email); }
+    render();
+  }, err));
   unsubs.push(S.store.watchState((a) => { S.active = a || {}; render(); }, err));
   unsubs.push(S.store.watchEvents(since, (ev) => { S.events = ev; S.loaded = true; render(); }, err));
   unsubs.push(S.store.watchMeasures((m) => { S.measures = m; render(); }, err));
+}
+
+// Acceso: solo las cuentas permitidas por las reglas de Firestore pueden ver la app.
+const VKEY = 'monitor-bebe-verificado';
+function wasVerified(email) { try { return localStorage.getItem(VKEY) === email; } catch { return false; } }
+function markVerified(email) { try { localStorage.setItem(VKEY, email); } catch {} }
+function denyAccess() {
+  const email = S.user?.email || '';
+  try { if (localStorage.getItem(VKEY) === email) localStorage.removeItem(VKEY); } catch {}
+  unsubs.forEach((f) => f && f());
+  unsubs = [];
+  S.loginMsg = `La cuenta ${email} no tiene acceso a esta app.`;
+  S.store.logout().catch(() => {});
+  S.user = null; S.access = null;
+  render();
 }
 
 const syncClass = () => 'sync' + (!S.sync.online ? ' off' : S.sync.pending ? ' pending' : '');
@@ -169,7 +191,11 @@ const me = () => S.user?.email || '';
 function render() {
   const app = document.getElementById('app');
   if (S.user === undefined) { app.innerHTML = ''; return; }
-  if (!S.user) { app.innerHTML = viewLogin(); return; }
+  if (!S.user) { app.innerHTML = viewLogin(); if (S.loginMsg) showLoginErr(S.loginMsg); return; }
+  if (S.access !== 'ok') {
+    app.innerHTML = `<div class="login"><img class="logo" src="icons/icon-192.png" alt=""><p>${navigator.onLine ? 'Comprobando acceso…' : 'Necesitas conexión para entrar la primera vez.'}</p></div>`;
+    return;
+  }
   const ae = document.activeElement;
   if (ae && ae.closest && ae.closest('main') && ae.matches('input,select,textarea')) { dirty = true; return; }
   dirty = false;
@@ -896,6 +922,7 @@ document.addEventListener('submit', async (ev) => {
   const f = ev.target, mode = ev.submitter?.dataset.mode || 'login';
   const email = f.email.value.trim(), pass = f.pass.value;
   if (!email || pass.length < 6) return showLoginErr('Escribe tu email y una contraseña de al menos 6 caracteres.');
+  S.loginMsg = null;
   f.querySelectorAll('button').forEach((b) => (b.disabled = true));
   try { await (mode === 'register' ? S.store.register(email, pass) : S.store.login(email, pass)); }
   catch (e) { showLoginErr(AUTH_ERR[e.code] || e.message); f.querySelectorAll('button').forEach((b) => (b.disabled = false)); }
