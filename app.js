@@ -1,5 +1,6 @@
 import { createStore } from './store.js';
 import { WHO } from './who.js';
+import { createVoice, voiceSupported, parseCommand, findNumber, norm } from './voice.js';
 
 // ---------------------------------------------------------------- utilidades
 const $ = (s, r = document) => r.querySelector(s);
@@ -61,6 +62,7 @@ const T = {
   pecho: { icon: '🤱', label: 'Pecho', c: 'var(--c-pecho)', g: 'tomas' },
   biberon: { icon: '🍼', label: 'Biberón', c: 'var(--c-biberon)', g: 'tomas' },
   extraccion: { icon: '🥛', label: 'Extracción', c: 'var(--c-extraccion)', g: 'tomas' },
+  regurgitacion: { icon: '💦', label: 'Regurgitación', c: 'var(--c-regurg)', g: 'tomas' },
   panal: { icon: '🧷', label: 'Pañal', c: 'var(--c-panal)', g: 'panales' },
   sueno: { icon: '🌙', label: 'Sueño', c: 'var(--c-sueno)', g: 'sueno' },
   medida: { icon: '📏', label: 'Medidas', c: 'var(--c-medida)', g: 'salud' },
@@ -86,6 +88,13 @@ function describe(e) {
       break;
     }
     case 'biberon': s = `${nf(e.ml || 0)} ml · ${e.leche === 'formula' ? 'fórmula' : 'materna'}`; break;
+    case 'regurgitacion': {
+      s = { poca: 'Poca cantidad', media: 'Cantidad media', mucha: 'Mucha cantidad' }[e.cantidad] || 'Regurgitación';
+      if (e.proyectil) s += ' · en proyectil';
+      const g = trasToma(e.t);
+      if (g != null) s += ` · ${fmtDur(g)} tras la toma`;
+      break;
+    }
     case 'extraccion': s = `${nf(e.ml || 0)} ml${e.lado ? ' · ' + LADO[e.lado].toLowerCase() : ''}`; break;
     case 'panal': {
       s = e.pis && e.caca ? 'Pis + caca' : e.caca ? 'Caca' : e.pis ? 'Pis' : 'Seco';
@@ -110,13 +119,20 @@ function describe(e) {
   if (e.nota && e.tipo !== 'nota') s += (s ? ' · ' : '') + e.nota;
   return s;
 }
+function trasToma(t) {
+  const f = S.events.find((x) => (x.tipo === 'pecho' || x.tipo === 'biberon') && (x.fin || x.t) <= t);
+  if (!f) return null;
+  const g = t - (f.fin || f.t);
+  return g < 6 * HOUR ? g : null;
+}
 const evTitle = (e) => (e.tipo === 'pecho' && e.lado ? `Pecho · terminó ${LADO[e.lado].toLowerCase()}` : T[e.tipo]?.label || e.tipo);
 
 // ---------------------------------------------------------------- estado
 const S = {
   store: null, user: undefined, baby: null, active: {}, events: [], measures: [],
   tab: 'inicio', filtro: 'todo', rango: 'hoy', medida: 'peso',
-  sync: { pending: false, online: true }, error: null, loaded: false,
+  sync: { pending: false, online: true }, error: null, loaded: false, lastAdded: null,
+  voice: { enabled: false, state: 'apagado' },
 };
 let unsubs = [];
 let charts = [];
@@ -186,6 +202,7 @@ const syncClass = () => 'sync' + (!S.sync.online ? ' off' : S.sync.pending ? ' p
 const fail = (e) => toast('No se pudo guardar: ' + (e?.message || e), true);
 const run = (p) => Promise.resolve(p).catch(fail);
 const me = () => S.user?.email || '';
+const addEv = (ev) => run(S.store.addEvent(ev)).then((r) => { if (r && r.id) S.lastAdded = { id: r.id, tipo: ev.tipo }; return r; });
 
 // ---------------------------------------------------------------- render
 function render() {
@@ -222,6 +239,7 @@ function header() {
   return `<header class="top">
     <div class="avatar">${S.baby?.sexo === 'nino' ? '👶🏻' : S.baby?.sexo === 'nina' ? '👶🏻' : '👶🏻'}</div>
     <div class="grow"><h1>${esc(nombre)}</h1><div class="age">${esc(babyAge(S.baby?.nacimiento)) || 'Configura los datos en Ajustes'}</div></div>
+    ${voiceSupported ? `<button class="mic ${S.voice.enabled ? 'on' : ''}" data-action="voice-toggle" title="Escucha por palabra clave">🎙️</button>` : ''}
     <span class="${syncClass()}" title="Sincronización"></span>
   </header>`;
 }
@@ -318,7 +336,9 @@ function viewHome() {
     <button class="qbtn" style="--c:var(--c-pecho)" data-action="pecho-start" data-lado="der">${sugerido === 'der' ? '<span class="badge">toca</span>' : ''}<span class="i">🤱</span>Pecho der.</button>`}
     <button class="qbtn" style="--c:var(--c-biberon)" data-action="new" data-tipo="biberon"><span class="i">🍼</span>Biberón</button>
     <button class="qbtn" style="--c:var(--c-panal)" data-action="new" data-tipo="panal"><span class="i">🧷</span>Pañal</button>
+    <button class="qbtn" style="--c:var(--c-regurg)" data-action="regurg-quick"><span class="i">💦</span>Regurgitó</button>
     ${sl ? '' : '<button class="qbtn" style="--c:var(--c-sueno)" data-action="sueno-start"><span class="i">🌙</span>Dormir</button>'}
+    ${voiceSupported ? '<button class="qbtn" style="--c:var(--accent)" data-action="voice-once"><span class="i">🎙️</span>Voz</button>' : ''}
     <button class="qbtn" style="--c:var(--accent)" data-action="more"><span class="i">＋</span>Más</button>
   </div>`;
 
@@ -329,6 +349,7 @@ function viewHome() {
     <div><div class="n">${st.tomas}</div><div class="l">tomas</div></div>
     <div><div class="n">${st.pis}</div><div class="l">pis</div></div>
     <div><div class="n">${st.caca}</div><div class="l">cacas</div></div>
+    <div><div class="n">${st.regurg}</div><div class="l">regurg.</div></div>
     <div><div class="n">${st.sueno ? (st.sueno / HOUR).toFixed(1).replace('.', ',') : 0}</div><div class="l">h sueño</div></div>
   </div>`;
 
@@ -353,7 +374,7 @@ function tick() {
 // ---------------------------------------------------------------- estadísticas
 function stats(from, to) {
   const evs = S.events.filter((e) => e.t >= from - DAY && e.t < to);
-  const r = { tomas: 0, pechoMs: 0, izq: 0, der: 0, biberones: 0, ml: 0, extraccionMl: 0, pis: 0, caca: 0, panales: 0, sueno: 0, suenos: 0, starts: [] };
+  const r = { regurg: 0, regurgTras: [], tomas: 0, pechoMs: 0, izq: 0, der: 0, biberones: 0, ml: 0, extraccionMl: 0, pis: 0, caca: 0, panales: 0, sueno: 0, suenos: 0, starts: [] };
   for (const e of evs) {
     const inWin = e.t >= from && e.t < to;
     if (e.tipo === 'sueno') {
@@ -365,6 +386,7 @@ function stats(from, to) {
     if (e.tipo === 'pecho') { r.tomas++; r.izq += e.segIzq || 0; r.der += e.segDer || 0; r.pechoMs += (e.segIzq || 0) + (e.segDer || 0); r.starts.push(e.t); }
     if (e.tipo === 'biberon') { r.tomas++; r.biberones++; r.ml += +e.ml || 0; r.starts.push(e.t); }
     if (e.tipo === 'extraccion') r.extraccionMl += +e.ml || 0;
+    if (e.tipo === 'regurgitacion') { r.regurg++; const g = trasToma(e.t); if (g != null) r.regurgTras.push(g); }
     if (e.tipo === 'panal') { r.panales++; if (e.pis) r.pis++; if (e.caca) r.caca++; }
   }
   if (S.active.sueno) r.sueno += overlap(S.active.sueno.inicio, Date.now(), from, to);
@@ -407,6 +429,7 @@ function viewSummary() {
     ${m('var(--c-biberon)', 'Biberón', `${pm(st.ml)} ml`, pl(pm(st.biberones, nd > 1 ? 1 : 0), 'biberón', 'biberones'))}
     ${m('var(--c-panal)', 'Pañales', pm(st.panales, nd > 1 ? 1 : 0), `${pm(st.pis, nd > 1 ? 1 : 0)} pis · ${pl(pm(st.caca, nd > 1 ? 1 : 0), 'caca', 'cacas')}`)}
     ${m('var(--c-sueno)', 'Sueño', fmtDur(per(st.sueno)), pl(pm(st.suenos, nd > 1 ? 1 : 0), 'periodo', 'periodos'))}
+    ${m('var(--c-regurg)', 'Regurgitaciones', pm(st.regurg, nd > 1 ? 1 : 0), st.regurgTras.length ? `${fmtDur(st.regurgTras.reduce((a, b) => a + b, 0) / st.regurgTras.length)} tras la toma de media` : '&nbsp;')}
     ${m('var(--c-extraccion)', 'Extracción', `${pm(st.extraccionMl)} ml`, '&nbsp;')}
   </div>`;
 
@@ -425,13 +448,14 @@ function viewSummary() {
       if (e.tipo === 'pecho') bars += `<i class="fd" style="left:${pos(e.t)}%;width:${Math.max(0.6, pos(Math.min(e.fin || e.t, de)) - pos(e.t))}%"></i>`;
       if (e.tipo === 'biberon') bars += `<i class="bb" style="left:${pos(e.t)}%"></i>`;
       if (e.tipo === 'panal') bars += `<i class="dp" style="left:${pos(e.t)}%"></i>`;
+      if (e.tipo === 'regurgitacion') bars += `<i class="rg" style="left:${pos(e.t)}%"></i>`;
     }
     if (i === 0) bars += `<span class="hr" style="left:${pos(now)}%;background:#ffffff55"></span>`;
     rows += `<div class="tl-row"><div class="lb">${i === 0 ? 'Hoy' : i === 1 ? 'Ayer' : shortDay(ds)}</div><div class="tl-bar">${bars}</div></div>`;
   }
   h += `<div class="section-title">Últimos 7 días</div><div class="card tl">${rows}
     <div class="tl-axis"><div></div><div><span>0h</span><span>6h</span><span>12h</span><span>18h</span><span>24h</span></div></div>
-    <div class="legend"><span><span class="dot" style="background:var(--c-sueno)"></span>Sueño</span><span><span class="dot" style="background:var(--c-pecho)"></span>Pecho</span><span><span class="dot" style="background:var(--c-biberon)"></span>Biberón</span><span><span class="dot" style="background:var(--c-panal)"></span>Pañal</span></div>
+    <div class="legend"><span><span class="dot" style="background:var(--c-sueno)"></span>Sueño</span><span><span class="dot" style="background:var(--c-pecho)"></span>Pecho</span><span><span class="dot" style="background:var(--c-biberon)"></span>Biberón</span><span><span class="dot" style="background:var(--c-panal)"></span>Pañal</span><span><span class="dot" style="background:var(--c-regurg)"></span>Regurgitación</span></div>
   </div>`;
 
   h += `<div class="section-title">Tomas y pañales por día</div><div class="card"><div class="chart-box"><canvas id="ch-tomas"></canvas></div></div>
@@ -527,6 +551,17 @@ function viewSettings() {
       <div class="grid2"><button class="opt ${b.sexo === 'nino' ? 'on' : ''}" data-action="pick-sexo" data-v="nino">Niño</button><button class="opt ${b.sexo === 'nina' ? 'on' : ''}" data-action="pick-sexo" data-v="nina">Niña</button></div></div>
     <div class="field"><label>Medicación diaria a recordar (vacío para ocultar)</label><input class="input" id="s-med" value="${esc(b.medDiaria ?? 'Vitamina D')}"></div>
     <button class="btn primary block" data-action="save-baby">Guardar</button>
+  </div>
+
+  <div class="section-title">Voz</div>
+  <div class="card">
+    ${voiceSupported ? `
+    <div class="field"><label>Palabra clave</label><input class="input" id="s-wake" value="${esc(voicePrefs().wake)}" placeholder="oye monitor">
+      <div class="faint" style="font-size:13px;margin-top:6px">Mejor dos palabras poco habituales en una conversación normal.</div></div>
+    <div class="field"><label>Activar la escucha al abrir la app</label>${pickPlain('s-auto', voicePrefs().auto ? '1' : '0', [['1', 'Sí'], ['0', 'No']])}</div>
+    <div class="grid2"><button class="btn" data-action="voice-help">Ver órdenes</button><button class="btn primary" data-action="save-voice">Guardar</button></div>
+    <p class="muted" style="font-size:13px;margin:12px 0 0">Con 🎙️ arriba activas la escucha: dices la palabra clave y luego la orden. Solo funciona con la app abierta (la pantalla se queda encendida). En iPhone, la voz funciona en Safari, no desde el icono de inicio.</p>`
+    : '<div class="muted" style="font-size:14px">Este navegador no admite reconocimiento de voz. Usa Chrome en Android o Safari en iPhone.</div>'}
   </div>
 
   <div class="section-title">Datos</div>
@@ -724,6 +759,13 @@ function openEventForm(tipo, ev) {
         ${timeField(e.t || now)}${notaField(e.nota)}`;
       read = (f) => { const ml = num(f.ml.value); if (!ml) return toast('Indica los ml', true), false; return { ml, leche: f.leche.value, t: fromLocalInput(f.t.value), nota: f.nota.value.trim() }; };
       break;
+    case 'regurgitacion':
+      body = `<div class="field"><label>Cantidad</label>${pick('cantidad', e.cantidad || 'poca', [['poca', 'Poca'], ['media', 'Media'], ['mucha', 'Mucha']])}</div>
+        <div class="field"><label>¿En proyectil?</label>${pick('proyectil', e.proyectil ? '1' : '0', [['0', 'No'], ['1', 'Sí']])}
+          <div class="hint hidden" id="rg-hint">Si los vómitos en proyectil se repiten, son verdes o con sangre, o no gana peso, consulta con el pediatra.</div></div>
+        ${timeField(e.t || now)}${notaField(e.nota)}`;
+      read = (f) => ({ cantidad: f.cantidad.value, proyectil: f.proyectil.value === '1', t: fromLocalInput(f.t.value), nota: f.nota.value.trim() });
+      break;
     case 'extraccion':
       body = `<div class="field"><label>Cantidad (ml)</label><input class="input" name="ml" inputmode="numeric" value="${e.ml ?? ''}"></div>
         <div class="field"><label>Pecho</label>${pick('lado', e.lado || 'ambos', [['izq', 'Izq.'], ['der', 'Der.'], ['ambos', 'Ambos']])}</div>
@@ -790,7 +832,7 @@ function openEventForm(tipo, ev) {
       if (!data.t || isNaN(data.t)) { toast('Revisa la fecha y hora', true); return false; }
       vibrate();
       if (ev) run(S.store.updateEvent(ev.id, data)).then(() => toast('Guardado'));
-      else { run(S.store.addEvent({ tipo, autor: me(), ...data })); toast(`${t.label} registrado`); }
+      else { addEv(({ tipo, autor: me(), ...data })); toast(`${t.label} registrado`); }
     },
     onDelete: ev ? () => { run(S.store.deleteEvent(ev.id)); toast('Eliminado'); } : null,
   });
@@ -802,6 +844,7 @@ function openEventForm(tipo, ev) {
       $('#color-f', form).classList.toggle('hidden', !(k === 'caca' || k === 'ambos'));
       $('#color-hint', form).classList.toggle('hidden', !['blanca', 'roja'].includes(form.color.value));
     }
+    if (tipo === 'regurgitacion') $('#rg-hint', form).classList.toggle('hidden', form.proyectil.value !== '1');
     if (tipo === 'temperatura') {
       const g = num(form.grados.value), hint = $('#temp-hint', form);
       const ageDays = S.baby?.nacimiento ? (Date.now() - S.baby.nacimiento) / DAY : 0;
@@ -819,7 +862,7 @@ function openEventForm(tipo, ev) {
 }
 
 function openMore() {
-  const items = [['extraccion'], ['medida'], ['medicacion'], ['temperatura'], ['bano'], ['nota'], ['pecho', 'Pecho (a mano)'], ['sueno', 'Sueño (a mano)']];
+  const items = [['regurgitacion'], ['extraccion'], ['medida'], ['medicacion'], ['temperatura'], ['bano'], ['nota'], ['pecho', 'Pecho (a mano)'], ['sueno', 'Sueño (a mano)']];
   const body = `<div class="menu-list">${items.map(([k, l]) => `<button type="button" class="qbtn" style="--c:${T[k].c}" data-action="new" data-tipo="${k}"><span class="i">${T[k].icon}</span>${l || T[k].label}</button>`).join('')}</div>`;
   openSheet('Registrar', body);
 }
@@ -842,7 +885,7 @@ const actions = {
   'daily-med': () => {
     const nombre = (S.baby?.medDiaria ?? 'Vitamina D').trim();
     vibrate();
-    run(S.store.addEvent({ tipo: 'medicacion', nombre, dosis: '', t: Date.now(), autor: me() }));
+    addEv(({ tipo: 'medicacion', nombre, dosis: '', t: Date.now(), autor: me() }));
     toast(`${nombre} marcada`);
   },
 
@@ -871,7 +914,7 @@ const actions = {
     const now = Date.now(), t = pechoTimes(p, now);
     if (t.total < 5000) { run(S.store.saveState({ pecho: null })); return; }
     const lado = t.izq && t.der ? p.lado : t.izq ? 'izq' : 'der';
-    run(S.store.addEvent({ tipo: 'pecho', t: p.inicio, fin: now, segIzq: Math.round(t.izq), segDer: Math.round(t.der), lado, primero: p.primero || p.lado, autor: me() }));
+    addEv(({ tipo: 'pecho', t: p.inicio, fin: now, segIzq: Math.round(t.izq), segDer: Math.round(t.der), lado, primero: p.primero || p.lado, autor: me() }));
     run(S.store.saveState({ pecho: null }));
     toast(`Toma guardada · ${fmtDur(t.total)}`);
   },
@@ -881,7 +924,7 @@ const actions = {
     const s = S.active.sueno; if (!s) return;
     vibrate();
     const now = Date.now();
-    run(S.store.addEvent({ tipo: 'sueno', t: s.inicio, fin: now, autor: me() }));
+    addEv(({ tipo: 'sueno', t: s.inicio, fin: now, autor: me() }));
     run(S.store.saveState({ sueno: null }));
     toast(`Sueño guardado · ${fmtDur(now - s.inicio)}`);
   },
@@ -900,6 +943,26 @@ const actions = {
     S._sexo = null;
   },
   export: () => exportCsv(),
+  'regurg-quick': () => {
+    vibrate();
+    addEv({ tipo: 'regurgitacion', cantidad: 'poca', proyectil: false, t: Date.now(), autor: me() });
+    toast('Regurgitación registrada · toca el registro para detallar');
+  },
+  'voice-toggle': () => {
+    if (!voice) return;
+    if (voice.enabled) { voice.disable(); toast('Escucha desactivada'); }
+    else if (voice.enable()) toast(`Di “${voicePrefs().wake}” y la orden`);
+  },
+  'voice-once': () => { if (voice) voice.listenOnce(); },
+  'voice-help': () => openSheet('Órdenes de voz', voiceHelp()),
+  'pick-auto': (b) => { document.querySelectorAll('[data-action="pick-auto"]').forEach((x) => x.classList.toggle('on', x === b)); },
+  'save-voice': () => {
+    const wake = norm($('#s-wake').value) || 'oye monitor';
+    const auto = $('[data-action="pick-auto"].on')?.dataset.v === '1';
+    saveVoicePrefs({ wake, auto });
+    document.activeElement?.blur();
+    toast('Guardado');
+  },
   logout: () => { if (confirm('¿Cerrar sesión en este móvil?')) S.store.logout(); },
   'reset-pass': async () => {
     const email = $('#login-form').email.value.trim();
@@ -961,3 +1024,173 @@ async function exportCsv() {
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   } catch (e) { if (e.name !== 'AbortError') toast('No se pudo exportar: ' + e.message, true); }
 }
+
+// ---------------------------------------------------------------- voz
+function pickPlain(id, value, opts) {
+  return `<div class="grid${opts.length}">${opts.map(([v, l]) => `<button type="button" class="opt ${String(value) === v ? 'on' : ''}" data-action="pick-auto" data-v="${v}">${l}</button>`).join('')}</div>`;
+}
+const VPREFS = 'monitor-bebe-voz';
+function voicePrefs() {
+  try { return { wake: 'oye monitor', auto: false, ...(JSON.parse(localStorage.getItem(VPREFS)) || {}) }; } catch { return { wake: 'oye monitor', auto: false }; }
+}
+function saveVoicePrefs(p) { try { localStorage.setItem(VPREFS, JSON.stringify(p)); } catch {} }
+
+function voiceHelp() {
+  const w = esc(voicePrefs().wake);
+  const g = (title, items) => `<div class="lbl" style="margin-top:14px">${title}</div><div class="card" style="padding:6px 14px;margin:0">${items.map((x) => `<div class="kv"><span>“${x}”</span></div>`).join('')}</div>`;
+  return `<p class="muted" style="margin-top:-6px">Di <b>“${w}”</b> seguido de la orden, o di “${w}”, espera el pitido y di la orden. Con el botón 🎙️ Voz no hace falta la palabra clave.</p>
+    ${g('Tomas', ['empieza pecho izquierdo', 'cambia de pecho', 'pausa / sigue', 'termina la toma', 'biberón de 60', 'biberón de 90 de leche materna'])}
+    ${g('Pañales y regurgitaciones', ['pañal de pis', 'pañal de caca', 'pañal de pis y caca', 'ha regurgitado un poco', 'ha vomitado mucho'])}
+    ${g('Sueño y otros', ['se ha dormido', 'se ha despertado', 'vitamina D dada', 'deshaz (borra lo último)'])}
+    ${g('Preguntas', ['¿cuándo comió?', '¿qué pecho le toca?', '¿cuánto lleva?', '¿cuándo fue el último pañal?', 'resumen del día'])}`;
+}
+
+const spokenDur = (ms) => {
+  const m = Math.round(Math.max(0, ms) / MIN);
+  if (m < 1) return 'menos de un minuto';
+  if (m < 60) return `${m} ${m === 1 ? 'minuto' : 'minutos'}`;
+  const h = Math.floor(m / 60), r = m % 60;
+  return `${h} ${h === 1 ? 'hora' : 'horas'}${r ? ` y ${r} ${r === 1 ? 'minuto' : 'minutos'}` : ''}`;
+};
+function sugeridoPecho() {
+  const lp = S.events.find((e) => e.tipo === 'pecho');
+  if (!lp) return null;
+  return lp.primero === 'izq' ? 'der' : lp.primero === 'der' ? 'izq' : lp.lado === 'izq' ? 'der' : 'izq';
+}
+
+function handleIntent(it, v) {
+  const say = (t) => v.speak(t);
+  const now = Date.now();
+  const p = S.active.pecho, sl = S.active.sueno;
+  const ladoTxt = (l) => LADO[l].toLowerCase();
+  switch (it.type) {
+    case 'pecho-inicio': {
+      if (p) {
+        if (it.lado && it.lado !== p.lado) { actions['pecho-side']({ dataset: { lado: it.lado } }); return say(`Cambio al ${ladoTxt(it.lado)}`); }
+        return say('Ya hay una toma en curso');
+      }
+      const l = it.lado || sugeridoPecho() || 'izq';
+      actions['pecho-start']({ dataset: { lado: l } });
+      return say(`Toma empezada, pecho ${ladoTxt(l)}`);
+    }
+    case 'pecho-cambiar': {
+      if (!p) return say('No hay ninguna toma en curso');
+      const l = it.lado || (p.lado === 'izq' ? 'der' : 'izq');
+      actions['pecho-side']({ dataset: { lado: l } });
+      return say(`Cambio al ${ladoTxt(l)}`);
+    }
+    case 'pecho-pausa':
+      if (!p || !p.desde) return say('No hay ninguna toma corriendo');
+      actions['pecho-pause'](); return say('Toma en pausa');
+    case 'pecho-seguir':
+      if (!p) return say('No hay ninguna toma en curso');
+      if (p.desde) return say('La toma ya está en marcha');
+      actions['pecho-pause'](); return say('Sigo con la toma');
+    case 'pecho-terminar': {
+      if (!p) return say('No hay ninguna toma en curso');
+      const t = pechoTimes(p);
+      actions['pecho-finish']();
+      return say(t.total < 5000 ? 'Toma descartada, duraba menos de cinco segundos' : `Toma guardada: ${spokenDur(t.total)}`);
+    }
+    case 'biberon':
+      addEv({ tipo: 'biberon', ml: it.ml, leche: it.leche, t: now, autor: me() });
+      return say(`Biberón de ${it.ml} mililitros apuntado`);
+    case 'biberon-pregunta':
+      return v.ask('¿Cuántos mililitros?', (txt) => {
+        const ml = findNumber(norm(txt));
+        if (ml) handleIntent({ type: 'biberon', ml, leche: it.leche }, v); else say('No te he entendido');
+      });
+    case 'panal':
+      addEv({ tipo: 'panal', pis: it.pis, caca: it.caca, color: '', t: now, autor: me() });
+      return say(`Pañal apuntado: ${it.pis && it.caca ? 'pis y caca' : it.caca ? 'caca' : 'pis'}`);
+    case 'panal-pregunta':
+      return v.ask('¿Pis, caca o las dos?', (txt) => {
+        const r = parseCommand('pañal ' + txt);
+        if (r && r.type === 'panal') handleIntent(r, v); else say('No te he entendido');
+      });
+    case 'regurgitacion': {
+      const g = trasToma(now);
+      addEv({ tipo: 'regurgitacion', cantidad: it.cantidad, proyectil: it.proyectil, t: now, autor: me() });
+      return say(`Regurgitación apuntada${g != null ? `, ${spokenDur(g)} después de la toma` : ''}`);
+    }
+    case 'sueno-inicio':
+      if (sl) return say('Ya consta que está durmiendo');
+      actions['sueno-start'](); return say('Sueño empezado. Que descanse');
+    case 'sueno-fin': {
+      if (!sl) return say('No había ningún sueño en marcha');
+      const d = now - sl.inicio;
+      actions['sueno-finish'](); return say(`Ha dormido ${spokenDur(d)}`);
+    }
+    case 'vitamina': {
+      const med = (S.baby?.medDiaria ?? 'Vitamina D').trim() || 'Vitamina D';
+      const d0 = dayStart(now);
+      if (S.events.find((e) => e.tipo === 'medicacion' && e.t >= d0 && (e.nombre || '').toLowerCase() === med.toLowerCase())) return say(`La ${med} ya estaba apuntada hoy`);
+      actions['daily-med'](); return say(`${med} apuntada`);
+    }
+    case 'deshacer': {
+      const la = S.lastAdded;
+      if (!la) return say('No hay nada que deshacer');
+      run(S.store.deleteEvent(la.id)); S.lastAdded = null;
+      return say(`Borrado: ${T[la.tipo]?.label || 'registro'}`);
+    }
+    case 'q-toma': {
+      if (p) return say(`Está comiendo ahora, lleva ${spokenDur(pechoTimes(p).total)}`);
+      const f = S.events.find((e) => e.tipo === 'pecho' || e.tipo === 'biberon');
+      if (!f) return say('Todavía no hay tomas apuntadas');
+      return say(`La última toma fue hace ${spokenDur(now - f.t)}, a las ${fmtTime(f.t)}${f.tipo === 'biberon' ? `, biberón de ${f.ml} mililitros` : `, terminó en el ${ladoTxt(f.lado || 'izq')}`}`);
+    }
+    case 'q-pecho': {
+      const sg = sugeridoPecho();
+      return say(sg ? `Le toca el ${ladoTxt(sg)}` : 'Aún no hay tomas de pecho apuntadas');
+    }
+    case 'q-duracion':
+      if (p) return say(`La toma lleva ${spokenDur(pechoTimes(p).total)}`);
+      if (sl) return say(`Lleva dormido ${spokenDur(now - sl.inicio)}`);
+      return say('Ahora mismo no hay nada en marcha');
+    case 'q-panal': {
+      const e = S.events.find((x) => x.tipo === 'panal');
+      return say(e ? `El último pañal fue hace ${spokenDur(now - e.t)}: ${describe(e).toLowerCase()}` : 'Todavía no hay pañales apuntados');
+    }
+    case 'q-sueno': {
+      if (sl) return say(`Lleva dormido ${spokenDur(now - sl.inicio)}`);
+      const e = S.events.find((x) => x.tipo === 'sueno' && x.fin);
+      return say(e ? `Se despertó hace ${spokenDur(now - e.fin)}, después de dormir ${spokenDur(e.fin - e.t)}` : 'Todavía no hay sueños apuntados');
+    }
+    case 'q-regurgitacion': {
+      const e = S.events.find((x) => x.tipo === 'regurgitacion');
+      return say(e ? `La última regurgitación fue hace ${spokenDur(now - e.t)}` : 'No hay regurgitaciones apuntadas');
+    }
+    case 'q-resumen': {
+      const st = stats(dayStart(now), now);
+      return say(`Hoy lleva ${st.tomas} ${st.tomas === 1 ? 'toma' : 'tomas'}, ${st.pis} pis, ${st.caca} ${st.caca === 1 ? 'caca' : 'cacas'}${st.regurg ? `, ${st.regurg} ${st.regurg === 1 ? 'regurgitación' : 'regurgitaciones'}` : ''} y ${spokenDur(st.sueno)} de sueño`);
+    }
+    default:
+      return say('No te he entendido');
+  }
+}
+
+const voiceOv = document.createElement('div');
+voiceOv.className = 'voice-ov hidden';
+document.body.appendChild(voiceOv);
+let ovTimer;
+const voice = voiceSupported ? createVoice({
+  getWakeWord: () => voicePrefs().wake,
+  onIntent: (it, v) => { if (!S.user || S.access !== 'ok') return v.speak('Primero inicia sesión'); handleIntent(it, v); },
+  onState: (st) => {
+    S.voice = st;
+    const m = $('.mic');
+    if (m) m.className = 'mic' + (st.enabled ? ' on' : '') + (st.state === 'escuchando' ? ' hot' : '');
+    clearTimeout(ovTimer);
+    if (st.state === 'escuchando' || st.state === 'procesando') {
+      voiceOv.innerHTML = `<span class="pulse" style="--c:var(--accent)"></span><b>${st.state === 'escuchando' ? 'Te escucho…' : 'Entendido'}</b>${st.texto ? `<div class="vt">“${esc(st.texto)}”</div>` : ''}`;
+      voiceOv.classList.remove('hidden');
+      ovTimer = setTimeout(() => voiceOv.classList.add('hidden'), 9000);
+    } else if (st.state === 'error') {
+      voiceOv.innerHTML = `<b>🎙️ ${esc(st.error)}</b>`;
+      voiceOv.classList.remove('hidden');
+      ovTimer = setTimeout(() => voiceOv.classList.add('hidden'), 6000);
+    } else voiceOv.classList.add('hidden');
+  },
+}) : null;
+if (voice && voicePrefs().auto) setTimeout(() => { if (S.user) voice.enable(); }, 1500);
+window.addEventListener('store-error', (e) => fail(e.detail));

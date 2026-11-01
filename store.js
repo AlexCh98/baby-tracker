@@ -62,7 +62,13 @@ async function createFirebaseStore(cfg) {
       const q = F.query(evCol, F.where('tipo', '==', 'medida'));
       return F.onSnapshot(q, (s) => cb(docs(s).sort((a, b) => a.t - b.t)), err);
     },
-    addEvent: (ev) => F.addDoc(evCol, { ...ev, creado: F.serverTimestamp() }),
+    addEvent(ev) {
+      // Se devuelve el id al instante (también sin conexión); el guardado se sincroniza después.
+      const ref = F.doc(evCol);
+      F.setDoc(ref, { ...ev, creado: F.serverTimestamp() })
+        .catch((e) => window.dispatchEvent(new CustomEvent('store-error', { detail: e })));
+      return Promise.resolve({ id: ref.id });
+    },
     updateEvent: (id, p) => F.updateDoc(F.doc(evCol, id), p),
     deleteEvent: (id) => F.deleteDoc(F.doc(evCol, id)),
     async allEvents() {
@@ -99,7 +105,7 @@ function createDemoStore() {
     saveState: async (p) => { data.state = { ...data.state, ...p }; save(); },
     watchEvents: (since, cb) => sub(() => cb(copy(data.events.filter((e) => e.t >= since).sort((a, b) => b.t - a.t)))),
     watchMeasures: (cb) => sub(() => cb(copy(data.events.filter((e) => e.tipo === 'medida').sort((a, b) => a.t - b.t)))),
-    addEvent: async (ev) => { data.events.push({ id: Math.random().toString(36).slice(2, 11), ...ev }); save(); },
+    addEvent: async (ev) => { const id = Math.random().toString(36).slice(2, 11); data.events.push({ id, ...ev }); save(); return { id }; },
     updateEvent: async (id, p) => { const e = data.events.find((x) => x.id === id); if (e) Object.assign(e, p); save(); },
     deleteEvent: async (id) => { data.events = data.events.filter((x) => x.id !== id); save(); },
     allEvents: async () => copy(data.events).sort((a, b) => a.t - b.t),
