@@ -80,6 +80,15 @@ async function createFirebaseStore(cfg) {
       return Promise.resolve({ id: ref.id });
     },
     deletePlan: (id) => F.deleteDoc(F.doc(planCol, id)),
+    // Colecciones genéricas (agenda, temas, notas…)
+    watchCol: (name, cb, err) => F.onSnapshot(F.collection(db, 'bebes', BABY, name), (s) => cb(docs(s)), err),
+    saveIn(name, d) {
+      const { id, ...data } = d;
+      const ref = id ? F.doc(db, 'bebes', BABY, name, id) : F.doc(F.collection(db, 'bebes', BABY, name));
+      F.setDoc(ref, data, { merge: true }).catch((e) => window.dispatchEvent(new CustomEvent('store-error', { detail: e })));
+      return Promise.resolve({ id: ref.id });
+    },
+    deleteIn: (name, id) => F.deleteDoc(F.doc(db, 'bebes', BABY, name, id)),
     async allEvents() {
       return docs(await F.getDocs(F.query(evCol, F.orderBy('t', 'asc'))));
     },
@@ -126,6 +135,15 @@ function createDemoStore() {
       save(); return { id };
     },
     deletePlan: async (id) => { data.plans = (data.plans || []).filter((x) => x.id !== id); save(); },
+    watchCol: (name, cb) => sub(() => cb(copy((data.cols || {})[name] || []))),
+    saveIn: async (name, d) => {
+      data.cols = data.cols || {}; const list = data.cols[name] || [];
+      const id = d.id || Math.random().toString(36).slice(2, 11);
+      const prev = list.find((x) => x.id === id) || {};
+      data.cols[name] = list.filter((x) => x.id !== id).concat([{ ...prev, ...d, id }]);
+      save(); return { id };
+    },
+    deleteIn: async (name, id) => { data.cols = data.cols || {}; data.cols[name] = (data.cols[name] || []).filter((x) => x.id !== id); save(); },
     onSync(cb) { cb({ pending: false, online: true }); },
   };
 }

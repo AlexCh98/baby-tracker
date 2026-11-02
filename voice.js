@@ -37,6 +37,10 @@ export function parseCommand(raw) {
   // Deshacer
   if (has(t, 'deshaz', 'deshacer', 'anula', 'borra (lo|el) ultimo', 'me he equivocado')) return { type: 'deshacer' };
 
+  // Notas: "apunta para el pediatra preguntar por las cacas"
+  if (/^(apunta|anota|apuntar|anotar|toma nota|añade|agrega)\b/.test(t)) return { type: 'nota', texto: String(raw).trim() };
+  if (has(t, 'cita', 'citas')) return { type: 'q-cita' };
+
   // Medicación: "se ha tomado el paracetamol", "le he dado la vitamina"
   if (has(t, 'tomad[oa]', 'me he tomado', 'se ha tomado', 'ya se tomo', 'he dado', 'le he dado', 'dad[oa]') && !has(t, 'cuando')) return { type: 'med-tomada', texto: t };
   if (has(t, 'medicin\\w*', 'medicament\\w*', 'pastilla\\w*')) return { type: 'q-med' };
@@ -89,6 +93,18 @@ export function parseCommand(raw) {
   if (has(t, 'pecho', 'teta', 'toma', 'empieza', 'inicia', 'comienza', 'a comer')) return { type: 'pecho-inicio', lado: lado(t) };
 
   return { type: 'desconocido', texto: raw };
+}
+
+// Devuelve el texto original (con tildes) que va después de la palabra clave.
+function afterWake(raw, wake) {
+  const words = String(raw).trim().split(/\s+/);
+  const nw = words.map(norm);
+  const ww = wake.split(' ');
+  for (let i = nw.length - ww.length; i >= 0; i--) {
+    if (ww.every((w, j) => nw[i + j] === w)) return words.slice(i + ww.length).join(' ').replace(/^[,.:;\s]+/, '').trim();
+  }
+  const t = norm(raw);
+  return t.slice(t.lastIndexOf(wake) + wake.length).trim();
 }
 
 // ---------------------------------------------------------------- motor de escucha
@@ -160,10 +176,10 @@ export function createVoice({ onIntent, onState, getWakeWord }) {
       once = false; command = text;
     } else if (armedUntil > now) {
       if (!isFinal) { state('escuchando', { texto: text }); return; }
-      command = wake && t.includes(wake) ? t.slice(t.lastIndexOf(wake) + wake.length) : text;
+      command = wake && t.includes(wake) ? afterWake(text, wake) : text;
       armedUntil = 0;
     } else if (wake && t.includes(wake)) {
-      const after = t.slice(t.lastIndexOf(wake) + wake.length).trim();
+      const after = afterWake(text, wake);
       if (!isFinal) { state('escuchando', { texto: after }); return; }
       if (after.split(' ').length >= 1 && after.length > 1) command = after;
       else { armedUntil = now + 7000; beep(); state('escuchando', { texto: '' }); setTimeout(() => { if (armedUntil && Date.now() > armedUntil) { armedUntil = 0; state('esperando'); } }, 7200); return; }

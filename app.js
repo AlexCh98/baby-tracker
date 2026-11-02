@@ -130,7 +130,7 @@ const evTitle = (e) => (e.tipo === 'pecho' && e.lado ? `Pecho · terminó ${LADO
 
 // ---------------------------------------------------------------- estado
 const S = {
-  store: null, user: undefined, baby: null, active: {}, events: [], measures: [], plans: [],
+  store: null, user: undefined, baby: null, active: {}, events: [], measures: [], plans: [], agenda: [], temas: [], notas: [], agendaSeg: 'proximo', saludTab: 'medicinas', temaOpen: {},
   tab: 'inicio', filtro: 'todo', rango: 'hoy', medida: 'peso',
   sync: { pending: false, online: true }, error: null, loaded: false, lastAdded: null,
   voice: { enabled: false, state: 'apagado' },
@@ -154,7 +154,7 @@ async function start() {
     unsubs = [];
     S.user = u;
     S.error = null;
-    S.baby = null; S.active = {}; S.events = []; S.measures = []; S.plans = []; S.loaded = false;
+    S.baby = null; S.active = {}; S.events = []; S.measures = []; S.plans = []; S.agenda = []; S.temas = []; S.notas = []; S.loaded = false;
     S.access = !u ? null : S.store.mode === 'demo' || wasVerified(u.email) ? 'ok' : 'checking';
     if (u) subscribe();
     render();
@@ -183,6 +183,9 @@ function subscribe() {
   unsubs.push(S.store.watchEvents(since, (ev) => { S.events = ev; S.loaded = true; render(); }, err));
   unsubs.push(S.store.watchMeasures((m) => { S.measures = m; render(); }, err));
   unsubs.push(S.store.watchPlans((pl) => { S.plans = pl; render(); checkMedAlerts(); }, err));
+  unsubs.push(S.store.watchCol('agenda', (x) => { S.agenda = x; render(); checkAgendaAlerts(); }, err));
+  unsubs.push(S.store.watchCol('temas', (x) => { S.temas = x; S.temasLoaded = true; render(); }, err));
+  unsubs.push(S.store.watchCol('notas', (x) => { S.notas = x; render(); }, err));
 }
 
 // Acceso: solo las cuentas permitidas por las reglas de Firestore pueden ver la app.
@@ -216,11 +219,12 @@ function render() {
     return;
   }
   const ae = document.activeElement;
-  if (ae && ae.closest && ae.closest('main') && ae.matches('input,select,textarea')) { dirty = true; return; }
+  const keepNote = ae && ae.closest && ae.closest('.add-note') ? { tema: ae.closest('.add-note').dataset.tema, value: ae.value } : null;
+  if (!keepNote && ae && ae.closest && ae.closest('main') && ae.matches('input,select,textarea')) { dirty = true; return; }
   dirty = false;
   charts.forEach((c) => c.destroy());
   charts = [];
-  const views = { inicio: viewHome, historial: viewHistory, resumen: viewSummary, crecimiento: viewGrowth, medicinas: viewMeds, ajustes: viewSettings };
+  const views = { inicio: viewHome, historial: viewHistory, resumen: viewSummary, crecimiento: () => saludSeg() + viewGrowth(), medicinas: () => saludSeg() + viewMeds(), agenda: viewAgenda, ajustes: viewSettings };
   const scroll = window.scrollY;
   app.innerHTML = `
     ${header()}
@@ -231,6 +235,7 @@ function render() {
     </main>
     ${nav()}`;
   window.scrollTo(0, scroll);
+  if (keepNote) { const i = document.querySelector(`.add-note[data-tema="${keepNote.tema}"] input`); if (i) { i.value = keepNote.value; i.focus({ preventScroll: true }); } }
   afterRender();
   tick();
 }
@@ -242,13 +247,18 @@ function header() {
     <div class="avatar">${S.baby?.sexo === 'nino' ? '👶🏻' : S.baby?.sexo === 'nina' ? '👶🏻' : '👶🏻'}</div>
     <div class="grow"><h1>${esc(nombre)}</h1><div class="age">${esc(babyAge(S.baby?.nacimiento)) || 'Configura los datos en Ajustes'}</div></div>
     ${voiceSupported ? `<button class="mic ${S.voice.enabled ? 'on' : ''}" data-action="voice-toggle" title="Escucha por palabra clave">🎙️</button>` : ''}
+    <button class="mic" style="filter:none;opacity:${S.tab === 'ajustes' ? 1 : .75}" data-action="tab" data-tab="ajustes" title="Ajustes">⚙️</button>
     <span class="${syncClass()}" title="Sincronización"></span>
   </header>`;
 }
 
 function nav() {
-  const items = [['inicio', '🏠', 'Inicio'], ['historial', '🗒️', 'Historial'], ['resumen', '📊', 'Resumen'], ['crecimiento', '📈', 'Peso'], ['medicinas', '💊', 'Medicinas'], ['ajustes', '⚙️', 'Ajustes']];
-  return `<nav class="nav">${items.map(([k, i, l]) => `<button data-action="tab" data-tab="${k}" class="${S.tab === k ? 'on' : ''}"><span class="i">${i}</span>${l}</button>`).join('')}</nav>`;
+  const items = [['inicio', '🏠', 'Inicio'], ['historial', '🗒️', 'Registro'], ['resumen', '📊', 'Resumen'], ['salud', '💊', 'Salud'], ['agenda', '📅', 'Agenda']];
+  const on = (k) => S.tab === k || (k === 'salud' && (S.tab === 'medicinas' || S.tab === 'crecimiento'));
+  return `<nav class="nav">${items.map(([k, i, l]) => `<button data-action="tab" data-tab="${k}" class="${on(k) ? 'on' : ''}"><span class="i">${i}</span>${l}</button>`).join('')}</nav>`;
+}
+function saludSeg() {
+  return `<div class="seg">${[['medicinas', 'Medicinas'], ['crecimiento', 'Peso y medidas']].map(([k, l]) => `<button class="${S.tab === k ? 'on' : ''}" data-action="tab" data-tab="${k}">${l}</button>`).join('')}</div>`;
 }
 
 function evRow(e) {
@@ -322,6 +332,7 @@ function viewHome() {
       <span class="v" style="font-size:18px" data-ago="${lastSueno.fin}">${fmtAgo(lastSueno.fin)}</span></div>` : ''}
   </div>`;
 
+  h += homeAgenda();
   h += homeMeds();
 
   // Medicación diaria
@@ -366,7 +377,7 @@ function viewHome() {
 
 function tick() {
   const now = Date.now();
-  if (now % 15000 < 1000) checkMedAlerts();
+  if (now % 15000 < 1000) { checkMedAlerts(); checkAgendaAlerts(); }
   const p = S.active.pecho;
   if (p) {
     const t = pechoTimes(p, now);
@@ -894,7 +905,7 @@ function openMore() {
 // ---------------------------------------------------------------- acciones
 const actions = {
   noop() {},
-  tab: (b) => { S.tab = b.dataset.tab; window.scrollTo(0, 0); render(); },
+  tab: (b) => { let t = b.dataset.tab; if (t === 'salud') t = S.saludTab; if (t === 'medicinas' || t === 'crecimiento') S.saludTab = t; S.tab = t; window.scrollTo(0, 0); render(); },
   filtro: (b) => { S.filtro = b.dataset.f; render(); },
   rango: (b) => { S.rango = b.dataset.r; render(); },
   medida: (b) => { S.medida = b.dataset.m; render(); },
@@ -1085,6 +1096,23 @@ function sugeridoPecho() {
 function handleIntent(it, v) {
   const say = (t) => v.speak(t);
   if (it.type === 'med-tomada' || it.type === 'q-med') return handleMedIntent(it, v);
+  if (it.type === 'nota') {
+    const temas = temasOrdenados();
+    const t = norm(it.texto);
+    const tema = /pediatra|medico/.test(t) ? 'pediatra' : /matrona/.test(t) ? 'matrona' : /compra|comprar/.test(t) ? 'compras'
+      : (temas.find((x) => norm(x.nombre).split(' ').some((w) => w.length > 3 && t.includes(w)))?.id || 'otros');
+    const texto = it.texto.replace(/^\s*(apunta|anota|apuntar|anotar|toma nota|añade|agrega)\b\s*(de\s+)?(que\s+)?(en|para|a)?\s*(la\s+lista\s+de\s+|las?\s+preguntas?\s+(del?|al|para el|a la)\s+|el|la|los)?\s*(pediatra|matrona|compras?|otras notas)?\s*[:,]?\s*(que\s+)?/i, '').trim();
+    if (!texto) return v.ask('¿Qué apunto?', (txt) => handleIntent({ type: 'nota', texto: `apunta ${txt}` }, v));
+    seedTemas();
+    run(S.store.saveIn('notas', { temaId: tema, texto: texto.charAt(0).toUpperCase() + texto.slice(1), hecho: false, t: Date.now(), autor: me() }));
+    return say(`Apuntado en ${(temas.find((x) => x.id === tema) || TEMAS_BASE.find((x) => x.id === tema))?.nombre.toLowerCase() || 'notas'}`);
+  }
+  if (it.type === 'q-cita') {
+    const c = agendaUpcoming().find((a) => a.tipo === 'cita');
+    if (!c) return say('No hay citas apuntadas');
+    const preg = c.temaId ? pendientes(c.temaId).length : 0;
+    return say(`La próxima cita es ${c.titulo}, ${dayLabel(c.cuando).toLowerCase()} a las ${fmtTime(c.cuando)}${preg ? `. Tenéis ${preg} ${preg === 1 ? 'pregunta apuntada' : 'preguntas apuntadas'}` : ''}`);
+  }
   const now = Date.now();
   const p = S.active.pecho, sl = S.active.sueno;
   const ladoTxt = (l) => LADO[l].toLowerCase();
@@ -1611,3 +1639,314 @@ function checkFeedAlert() {
   toast(`Han pasado ${String(nf2.maxH).replace('.', ',')} h desde la última toma`);
 }
 setInterval(checkFeedAlert, 30000);
+
+// ---------------------------------------------------------------- agenda: notas por temas, citas y recordatorios
+const TEMAS_BASE = [
+  { id: 'pediatra', nombre: 'Preguntas al pediatra', icono: '🩺', orden: 1 },
+  { id: 'matrona', nombre: 'Preguntas a la matrona', icono: '🤱', orden: 2 },
+  { id: 'compras', nombre: 'Compras', icono: '🛒', orden: 3 },
+  { id: 'otros', nombre: 'Otras notas', icono: '📝', orden: 9 },
+];
+const CATS = { pediatra: ['🩺', 'Pediatra'], matrona: ['🤱', 'Matrona'], vacunas: ['💉', 'Vacunas'], gine: ['👩‍⚕️', 'Ginecología'], otra: ['📅', 'Otra'] };
+const AVISOS = [['0', 'No'], ['30', '30 min'], ['60', '1 h'], ['120', '2 h'], ['1440', '1 día']];
+
+function temasOrdenados() {
+  const list = S.temas.length ? S.temas : TEMAS_BASE;
+  return [...list].sort((a, b) => (a.orden ?? 5) - (b.orden ?? 5) || a.nombre.localeCompare(b.nombre));
+}
+function seedTemas() {
+  if (S.store.mode !== 'demo' && !S.temasLoaded) return;
+  if (S.temas.length || S._seeded) return;
+  S._seeded = true;
+  TEMAS_BASE.forEach((t) => S.store.saveIn('temas', t));
+}
+const notasDe = (temaId) => S.notas.filter((n) => n.temaId === temaId);
+const pendientes = (temaId) => notasDe(temaId).filter((n) => !n.hecho);
+
+function agendaUpcoming(now = Date.now()) {
+  return S.agenda.filter((a) => !a.hecho && a.cuando >= now - (a.tipo === 'cita' ? 2 * HOUR : 12 * HOUR)).sort((a, b) => a.cuando - b.cuando);
+}
+
+function agendaRow(a) {
+  const now = Date.now();
+  const cat = a.tipo === 'cita' ? CATS[a.categoria] || CATS.otra : ['🔔', 'Recordatorio'];
+  const late = a.tipo === 'recordatorio' && a.cuando <= now;
+  const preg = a.tipo === 'cita' && a.temaId ? pendientes(a.temaId).length : 0;
+  const quien = a.persona ? `<span class="who-tag ${a.persona}">${a.persona === 'mama' ? 'Mamá' : 'Bebé'}</span> ` : '';
+  return `<div class="ag ${late ? 'due' : ''} ${a.hecho ? 'done' : ''}">
+    <button class="ag-main" data-action="ag-edit" data-id="${esc(a.id)}">
+      <span class="ic" style="--c:${a.tipo === 'cita' ? 'var(--accent)' : 'var(--warn)'}">${cat[0]}</span>
+      <span class="tx">
+        <div class="t1">${quien}${esc(a.titulo)}</div>
+        <div class="t2">${late ? '<span style="color:var(--warn)">⏰ ' : ''}${dayLabel(a.cuando)} · ${fmtTime(a.cuando)}${late ? '</span>' : ''}${a.lugar ? ` · ${esc(a.lugar)}` : ''}${a.repetir ? ` · 🔁 ${a.repetir === 'dia' ? 'cada día' : 'cada semana'}` : ''}</div>
+        ${preg ? `<div class="t2" style="color:var(--accent)">❓ ${pl(preg, 'pregunta pendiente', 'preguntas pendientes')}</div>` : ''}
+      </span>
+    </button>
+    ${a.tipo === 'recordatorio' && !a.hecho ? `<button class="ag-check" data-action="ag-done" data-id="${esc(a.id)}" title="Hecho">✓</button>` : ''}
+  </div>`;
+}
+
+function homeAgenda() {
+  const now = Date.now();
+  const list = agendaUpcoming(now).filter((a) => (a.tipo === 'cita' ? a.cuando - now < 7 * DAY : a.cuando - now < 24 * HOUR)).slice(0, 3);
+  if (!list.length) return '';
+  return `<div class="section-title">Próximamente <button data-action="tab" data-tab="agenda">Agenda</button></div>
+    <div class="card" style="padding:4px 12px">${list.map(agendaRow).join('')}</div>`;
+}
+
+function viewAgenda() {
+  seedTemas();
+  let h = `<div class="seg">${[['proximo', '📅 Citas y avisos'], ['notas', '📝 Notas']].map(([k, l]) => `<button class="${S.agendaSeg === k ? 'on' : ''}" data-action="ag-seg" data-v="${k}">${l}</button>`).join('')}</div>`;
+  if (S.agendaSeg === 'notas') return h + viewNotas();
+
+  h += `<div class="grid2" style="margin-bottom:14px"><button class="btn primary" data-action="ag-new" data-tipo="cita">＋ Cita</button><button class="btn" data-action="ag-new" data-tipo="recordatorio">＋ Recordatorio</button></div>`;
+  const up = agendaUpcoming();
+  if (!up.length) h += `<div class="card empty">No hay nada pendiente.<br>Añade la próxima revisión del pediatra o un recordatorio.</div>`;
+  else {
+    const groups = new Map();
+    for (const a of up) { const k = dayStart(a.cuando); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(a); }
+    for (const [k, list] of groups) h += `<div class="day-h"><span>${dayLabel(k)}</span></div><div class="card" style="padding:4px 12px">${list.map(agendaRow).join('')}</div>`;
+  }
+  const past = S.agenda.filter((a) => !up.includes(a)).sort((a, b) => b.cuando - a.cuando).slice(0, 15);
+  if (past.length) {
+    h += `<div class="section-title">Pasado <button data-action="ag-togglepast">${S.showPast ? 'Ocultar' : 'Ver'}</button></div>`;
+    if (S.showPast) h += `<div class="card" style="padding:4px 12px;opacity:.75">${past.map(agendaRow).join('')}</div>`;
+  }
+  return h;
+}
+
+function viewNotas() {
+  let h = '';
+  for (const t of temasOrdenados()) {
+    const all = notasDe(t.id).sort((a, b) => (a.hecho - b.hecho) || (a.hecho ? b.hechoT - a.hechoT : a.t - b.t));
+    const pend = all.filter((n) => !n.hecho), done = all.filter((n) => n.hecho);
+    const open = S.temaOpen[t.id] ?? true;
+    const cita = S.agenda.filter((a) => a.tipo === 'cita' && !a.hecho && a.temaId === t.id && a.cuando > Date.now() - 2 * HOUR).sort((a, b) => a.cuando - b.cuando)[0];
+    h += `<div class="card tema">
+      <div class="tema-h">
+        <button class="tema-t" data-action="tema-toggle" data-id="${esc(t.id)}"><span>${esc(t.icono || '📝')}</span><b>${esc(t.nombre)}</b>${pend.length ? `<span class="cnt">${pend.length}</span>` : ''}<span class="faint" style="margin-left:auto">${open ? '▾' : '▸'}</span></button>
+        <button class="tema-edit" data-action="tema-edit" data-id="${esc(t.id)}" title="Editar tema">⋯</button>
+      </div>
+      ${cita ? `<div class="faint" style="font-size:13px;margin:-4px 0 8px">📅 Próxima cita: ${dayLabel(cita.cuando).toLowerCase()} ${fmtTime(cita.cuando)}</div>` : ''}
+      ${open ? `
+        <form class="add-note" data-tema="${esc(t.id)}"><input class="input" name="texto" placeholder="Añadir…" autocomplete="off"><button class="btn primary" type="submit">＋</button></form>
+        ${pend.map(noteRow).join('')}
+        ${done.length ? `<button class="link" style="margin:2px 0 0;padding:6px 0" data-action="tema-done" data-id="${esc(t.id)}">${S.showDone?.[t.id] ? 'Ocultar' : 'Ver'} ${pl(done.length, 'hecha', 'hechas')}</button>${S.showDone?.[t.id] ? done.map(noteRow).join('') : ''}` : ''}
+        ${!all.length ? '<div class="faint" style="font-size:14px;padding:6px 2px">Nada apuntado</div>' : ''}` : ''}
+    </div>`;
+  }
+  h += `<button class="btn block" data-action="tema-new">＋ Nuevo tema</button>`;
+  return h;
+}
+
+function noteRow(n) {
+  const who = n.autor && n.autor !== me() ? ` · ${esc(n.autor.split('@')[0])}` : '';
+  return `<div class="note ${n.hecho ? 'done' : ''}">
+    <button class="note-chk" data-action="note-toggle" data-id="${esc(n.id)}">${n.hecho ? '✓' : ''}</button>
+    <button class="note-tx" data-action="note-edit" data-id="${esc(n.id)}"><div>${esc(n.texto)}</div>${n.respuesta ? `<div class="note-ans">↳ ${esc(n.respuesta)}</div>` : ''}<div class="faint" style="font-size:12px">${shortDay(n.t)}${who}</div></button>
+  </div>`;
+}
+
+document.addEventListener('submit', (ev) => {
+  const f = ev.target.closest('.add-note');
+  if (!f) return;
+  ev.preventDefault();
+  const texto = f.texto.value.trim();
+  if (!texto) return;
+  run(S.store.saveIn('notas', { temaId: f.dataset.tema, texto, hecho: false, t: Date.now(), autor: me() }));
+  f.texto.value = '';
+  vibrate();
+  setTimeout(() => f.texto.focus(), 50);
+});
+
+function openAgendaForm(tipo, a) {
+  const e = a || {};
+  const now = Date.now();
+  const def = new Date(now + DAY); def.setHours(10, 0, 0, 0);
+  const temaOpts = temasOrdenados().map((t) => `<option value="${esc(t.id)}" ${(e.temaId ?? (e.categoria === 'matrona' ? 'matrona' : 'pediatra')) === t.id ? 'selected' : ''}>${esc(t.icono || '')} ${esc(t.nombre)}</option>`).join('');
+  let body;
+  if (tipo === 'cita') {
+    const cat = e.categoria || 'pediatra';
+    body = `<div class="field"><label>Tipo</label><input type="hidden" name="categoria" value="${cat}">
+        <div class="chip-row">${Object.entries(CATS).map(([k, [i, l]]) => `<button type="button" class="chip ${cat === k ? 'on' : ''}" data-pick="categoria" data-v="${k}">${i} ${l}</button>`).join('')}</div></div>
+      <div class="field"><label>Para</label>${pick('persona', e.persona || 'bebe', [['bebe', 'Bebé', '👶'], ['mama', 'Mamá', '👩']])}</div>
+      <div class="field"><label>Título</label><input class="input" name="titulo" value="${esc(e.titulo || '')}" placeholder="p. ej. Revisión de los 15 días"></div>
+      ${timeField(e.cuando || def.getTime(), 'Fecha y hora', 'cuando', false)}
+      <div class="field"><label>Lugar (opcional)</label><input class="input" name="lugar" value="${esc(e.lugar || '')}" placeholder="Centro de salud, consulta…"></div>
+      <div class="field"><label>Avisar antes</label>${pick('aviso', String(e.avisoMin ?? 120), AVISOS, 5)}</div>
+      <div class="field"><label>Preguntas que llevar</label><select class="input" name="temaId"><option value="">Ninguna</option>${temaOpts}</select></div>
+      <div class="field"><label>Notas (opcional)</label><textarea class="input" name="notas" placeholder="Llevar cartilla, informe…">${esc(e.notas || '')}</textarea></div>
+      ${a && a.temaId && pendientes(a.temaId).length ? `<div class="lbl">Preguntas pendientes</div><div class="card" style="padding:4px 12px">${pendientes(a.temaId).map(noteRow).join('')}</div>` : ''}
+      ${a ? `<button type="button" class="btn block" style="margin-bottom:10px" data-action="ag-ics" data-id="${esc(a.id)}">📅 Añadir al calendario del móvil</button>
+        <button type="button" class="btn block" style="margin-bottom:12px" data-action="ag-done" data-id="${esc(a.id)}">${a.hecho ? '↺ Marcar como pendiente' : '✓ Marcar como hecha'}</button>` : ''}`;
+  } else {
+    const inOneHour = new Date(now + HOUR); inOneHour.setMinutes(0, 0, 0);
+    body = `<div class="field"><label>¿Qué hay que recordar?</label><input class="input" name="titulo" value="${esc(e.titulo || '')}" placeholder="p. ej. Pedir cita para las vacunas"></div>
+      ${timeField(e.cuando || inOneHour.getTime(), 'Cuándo', 'cuando', false)}
+      <div class="chip-row" style="margin:-6px 0 14px">${[[60, '+1 h'], [180, '+3 h'], ['m9', 'Mañana 9:00'], ['m20', 'Hoy 20:00']].map(([v, l]) => `<button type="button" class="chip" data-when="${v}">${l}</button>`).join('')}</div>
+      <div class="field"><label>Repetir</label>${pick('repetir', e.repetir || '', [['', 'No'], ['dia', 'Cada día'], ['semana', 'Cada semana']])}</div>
+      <div class="field"><label>Para (opcional)</label>${pick('persona', e.persona || '', [['', 'Todos'], ['bebe', 'Bebé'], ['mama', 'Mamá']])}</div>
+      ${a ? `<button type="button" class="btn block" style="margin-bottom:12px" data-action="ag-done" data-id="${esc(a.id)}">${a.hecho ? '↺ Marcar como pendiente' : '✓ Hecho'}</button>` : ''}`;
+  }
+  const form = openSheet(a ? (tipo === 'cita' ? 'Editar cita' : 'Editar recordatorio') : tipo === 'cita' ? 'Nueva cita' : 'Nuevo recordatorio', body, {
+    icon: `<span style="font-size:24px">${tipo === 'cita' ? '📅' : '🔔'}</span>`,
+    onSave: (f) => {
+      const cuando = fromLocalInput(f.cuando.value);
+      if (isNaN(cuando)) return toast('Revisa la fecha y hora', true), false;
+      const d = { tipo, cuando, persona: f.persona.value, actualizado: Date.now() };
+      if (tipo === 'cita') {
+        d.categoria = f.categoria.value;
+        d.titulo = f.titulo.value.trim() || `${CATS[d.categoria][1]}${d.persona === 'mama' ? ' (mamá)' : ''}`;
+        d.lugar = f.lugar.value.trim(); d.avisoMin = +f.aviso.value; d.temaId = f.temaId.value; d.notas = f.notas.value.trim();
+      } else {
+        d.titulo = f.titulo.value.trim();
+        if (!d.titulo) return toast('Escribe qué hay que recordar', true), false;
+        d.repetir = f.repetir.value;
+      }
+      if (a) d.id = a.id; else { d.hecho = false; d.autor = me(); }
+      if (cuando !== e.cuando) d.avisado = null;
+      run(S.store.saveIn('agenda', d)).then(() => toast(a ? 'Guardado' : tipo === 'cita' ? 'Cita guardada' : 'Recordatorio guardado'));
+      if (notifState() === 'default') setTimeout(() => actions['notif-enable'](), 600);
+    },
+    onDelete: a ? () => { run(S.store.deleteIn('agenda', a.id)); toast('Eliminado'); } : null,
+  });
+  form.addEventListener('click', (ev) => {
+    const w = ev.target.closest('[data-when]'); if (!w) return;
+    const v = w.dataset.when; const d = new Date();
+    if (v === 'm9') { d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); }
+    else if (v === 'm20') d.setHours(20, 0, 0, 0);
+    else d.setTime(Date.now() + v * MIN);
+    form.cuando.value = toLocalInput(d.getTime());
+  });
+  if (tipo === 'cita') {
+    let lastCat = form.categoria.value;
+    form.addEventListener('change', () => {
+      const c = form.categoria.value;
+      if (c !== lastCat) { lastCat = c; if (c === 'pediatra' || c === 'matrona') form.temaId.value = c; }
+    });
+  }
+}
+
+function openNoteForm(n) {
+  const opts = temasOrdenados().map((t) => `<option value="${esc(t.id)}" ${n.temaId === t.id ? 'selected' : ''}>${esc(t.icono || '')} ${esc(t.nombre)}</option>`).join('');
+  openSheet('Nota', `
+    <div class="field"><label>Nota</label><textarea class="input" name="texto">${esc(n.texto)}</textarea></div>
+    <div class="field"><label>Respuesta / lo que nos dijeron (opcional)</label><textarea class="input" name="respuesta" placeholder="Apunta aquí lo que os contesten">${esc(n.respuesta || '')}</textarea></div>
+    <div class="field"><label>Tema</label><select class="input" name="temaId">${opts}</select></div>`, {
+    icon: '<span style="font-size:24px">📝</span>',
+    onSave: (f) => {
+      const texto = f.texto.value.trim();
+      if (!texto) return toast('La nota está vacía', true), false;
+      const respuesta = f.respuesta.value.trim();
+      run(S.store.saveIn('notas', { id: n.id, texto, respuesta, temaId: f.temaId.value, ...(respuesta && !n.hecho ? { hecho: true, hechoT: Date.now() } : {}) }));
+    },
+    onDelete: () => run(S.store.deleteIn('notas', n.id)),
+  });
+}
+
+function openTemaForm(t) {
+  const iconos = ['📝', '🩺', '🤱', '🛒', '💉', '🏠', '👶', '👩', '📄', '🚗', '🎁', '💡'];
+  openSheet(t ? 'Editar tema' : 'Nuevo tema', `
+    <div class="field"><label>Nombre</label><input class="input" name="nombre" value="${esc(t?.nombre || '')}" placeholder="p. ej. Papeleo, Visitas, Ideas"></div>
+    <div class="field"><label>Icono</label><input type="hidden" name="icono" value="${esc(t?.icono || '📝')}"><div class="chip-row">${iconos.map((i) => `<button type="button" class="chip ${(t?.icono || '📝') === i ? 'on' : ''}" data-pick="icono" data-v="${i}">${i}</button>`).join('')}</div></div>`, {
+    icon: '<span style="font-size:24px">🗂️</span>',
+    onSave: (f) => {
+      const nombre = f.nombre.value.trim();
+      if (!nombre) return toast('Ponle un nombre', true), false;
+      run(S.store.saveIn('temas', { ...(t ? { id: t.id } : { orden: 5 }), nombre, icono: f.icono.value }));
+    },
+    onDelete: t ? () => {
+      if (notasDe(t.id).length && !confirm(`Se borrarán también sus ${notasDe(t.id).length} notas. ¿Seguro?`)) return;
+      notasDe(t.id).forEach((n) => S.store.deleteIn('notas', n.id));
+      run(S.store.deleteIn('temas', t.id));
+    } : null,
+  });
+}
+
+function nextRepeat(a) {
+  const step = a.repetir === 'semana' ? 7 * DAY : DAY;
+  let c = a.cuando;
+  do c += step; while (c <= Date.now());
+  return c;
+}
+
+Object.assign(actions, {
+  'ag-seg': (b) => { S.agendaSeg = b.dataset.v; render(); },
+  'ag-new': (b) => openAgendaForm(b.dataset.tipo),
+  'ag-edit': (b) => { const a = S.agenda.find((x) => x.id === b.dataset.id); if (a) openAgendaForm(a.tipo, a); },
+  'ag-togglepast': () => { S.showPast = !S.showPast; render(); },
+  'ag-done': (b) => {
+    const a = S.agenda.find((x) => x.id === b.dataset.id); if (!a) return;
+    vibrate();
+    if (!a.hecho && a.repetir) { run(S.store.saveIn('agenda', { id: a.id, cuando: nextRepeat(a), avisado: null })); toast('Hecho · se repetirá'); }
+    else { run(S.store.saveIn('agenda', { id: a.id, hecho: !a.hecho })); toast(a.hecho ? 'Pendiente otra vez' : 'Hecho'); }
+    closeSheet();
+  },
+  'ag-snooze': (b) => {
+    const a = S.agenda.find((x) => x.id === b.dataset.id); if (!a) return;
+    run(S.store.saveIn('agenda', { id: a.id, cuando: Date.now() + (+b.dataset.min) * MIN, avisado: null }));
+    toast('Pospuesto'); closeSheet();
+  },
+  'ag-ics': (b) => {
+    const a = S.agenda.find((x) => x.id === b.dataset.id); if (!a) return;
+    const z = (t) => new Date(t).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    const e2 = (x) => String(x || '').replace(/[\\,;]/g, (c) => '\\' + c).replace(/\n/g, '\\n');
+    const preg = a.temaId ? pendientes(a.temaId).map((n) => '- ' + n.texto).join('\n') : '';
+    const desc = [a.notas, preg && 'Preguntas:\n' + preg].filter(Boolean).join('\n\n');
+    const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Monitor Bebe//ES', 'BEGIN:VEVENT', `UID:${a.id}@monitor-bebe`, `DTSTAMP:${z(Date.now())}`,
+      `DTSTART:${z(a.cuando)}`, `DTEND:${z(a.cuando + HOUR)}`, `SUMMARY:${e2(a.titulo)}`, a.lugar ? `LOCATION:${e2(a.lugar)}` : '', desc ? `DESCRIPTION:${e2(desc)}` : '',
+      ...(a.avisoMin ? ['BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${e2(a.titulo)}`, `TRIGGER:-PT${a.avisoMin}M`, 'END:VALARM'] : []), 'END:VEVENT', 'END:VCALENDAR'].filter(Boolean);
+    const file = new File([lines.join('\r\n')], 'cita.ics', { type: 'text/calendar' });
+    if (/iPhone|iPad/.test(navigator.userAgent)) { location.href = URL.createObjectURL(file); return; }
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { navigator.share({ files: [file] }).catch(() => {}); return; }
+    const l = document.createElement('a'); l.href = URL.createObjectURL(file); l.download = 'cita.ics'; l.click();
+  },
+  'note-toggle': (b) => {
+    const n = S.notas.find((x) => x.id === b.dataset.id); if (!n) return;
+    vibrate();
+    run(S.store.saveIn('notas', { id: n.id, hecho: !n.hecho, hechoT: Date.now() }));
+  },
+  'note-edit': (b) => { const n = S.notas.find((x) => x.id === b.dataset.id); if (n) openNoteForm(n); },
+  'tema-toggle': (b) => { S.temaOpen[b.dataset.id] = !(S.temaOpen[b.dataset.id] ?? true); render(); },
+  'tema-done': (b) => { S.showDone = { ...(S.showDone || {}), [b.dataset.id]: !S.showDone?.[b.dataset.id] }; render(); },
+  'tema-new': () => openTemaForm(),
+  'tema-edit': (b) => { const t = S.temas.find((x) => x.id === b.dataset.id); if (t) openTemaForm(t); },
+});
+
+// Avisos de agenda (citas con antelación y recordatorios a su hora)
+function checkAgendaAlerts() {
+  if (!S.user || S.access !== 'ok' || !S.agenda.length) return;
+  const now = Date.now();
+  const alerted = loadJson(ALERT_KEY, []);
+  const fire = [];
+  for (const a of S.agenda) {
+    if (a.hecho) continue;
+    const at = a.tipo === 'cita' ? (a.avisoMin ? a.cuando - a.avisoMin * MIN : null) : a.cuando;
+    if (at == null || now < at || now - at > 12 * HOUR || (a.tipo === 'cita' && now > a.cuando)) continue;
+    const key = `ag:${a.id}:${a.cuando}`;
+    if (alerted.includes(key)) continue;
+    alerted.push(key); fire.push(a);
+  }
+  if (!fire.length) return;
+  saveJson(ALERT_KEY, alerted.slice(-300));
+  for (const a of fire) {
+    if (a.tipo === 'cita') {
+      const preg = a.temaId ? pendientes(a.temaId).length : 0;
+      notify(`📅 ${a.titulo}`, `${dayLabel(a.cuando)} a las ${fmtTime(a.cuando)}${a.lugar ? ' · ' + a.lugar : ''}${preg ? ` · ${preg} preguntas apuntadas` : ''}`, `ag-${a.id}`);
+    } else notify(`🔔 ${a.titulo}`, `Recordatorio de las ${fmtTime(a.cuando)}`, `ag-${a.id}`);
+  }
+  alarmSound();
+  const rec = fire.find((a) => a.tipo === 'recordatorio');
+  const cur = $('#sheet-root');
+  if (document.hidden || (cur && cur.dataset.kind !== 'ag-alert')) { toast(fire[0].titulo); return; }
+  const a = rec || fire[0];
+  openSheet(a.tipo === 'cita' ? 'Cita próxima' : 'Recordatorio', `
+    <div class="card" style="text-align:center"><div style="font-size:40px">${a.tipo === 'cita' ? (CATS[a.categoria] || CATS.otra)[0] : '🔔'}</div>
+      <div style="font-size:19px;font-weight:700;margin-top:6px">${esc(a.titulo)}</div>
+      <div class="muted" style="margin-top:4px">${dayLabel(a.cuando)} · ${fmtTime(a.cuando)}${a.lugar ? ` · ${esc(a.lugar)}` : ''}</div></div>
+    ${a.tipo === 'cita' && a.temaId && pendientes(a.temaId).length ? `<div class="lbl">Preguntas para llevar</div><div class="card" style="padding:4px 12px">${pendientes(a.temaId).map(noteRow).join('')}</div>` : ''}
+    ${a.tipo === 'recordatorio' ? `<button type="button" class="btn c block" style="--c:var(--ok);padding:15px" data-action="ag-done" data-id="${esc(a.id)}">✓ Hecho</button>
+      <div class="grid2" style="margin-top:10px"><button type="button" class="btn" data-action="ag-snooze" data-id="${esc(a.id)}" data-min="15">+15 min</button><button type="button" class="btn" data-action="ag-snooze" data-id="${esc(a.id)}" data-min="60">+1 h</button></div>`
+      : `<button type="button" class="btn primary block" data-action="close-sheet">Entendido</button>`}`, { icon: '<span style="font-size:24px">⏰</span>' });
+  const r = $('#sheet-root'); if (r) r.dataset.kind = 'ag-alert';
+}
