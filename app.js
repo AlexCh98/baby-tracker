@@ -313,6 +313,7 @@ function viewHome() {
       <span class="k"><span class="dot" style="background:var(--c-panal)"></span>Último pañal</span>
       ${lastPanal ? `<span class="v" data-ago="${lastPanal.t}">${fmtAgo(lastPanal.t)}</span><span class="d">${fmtTime(lastPanal.t)} · ${esc(describe(lastPanal))}</span>` : '<span class="v">—</span><span class="d">Sin registros</span>'}
     </button>
+    ${!p && lastFeed ? nextFeedCard() : ''}
     ${lastPecho && !p ? `<div class="stat wide" style="min-height:0;flex-direction:row;align-items:center;justify-content:space-between">
       <span><span class="k"><span class="dot" style="background:var(--c-pecho)"></span>Siguiente pecho</span><span class="d">La última empezó por el ${LADO[lastPecho.primero || lastPecho.lado]?.toLowerCase() || '—'}</span></span>
       <span class="v" style="font-size:18px;color:var(--c-pecho)">${LADO[sugerido]}</span></div>` : ''}
@@ -458,6 +459,7 @@ function viewSummary() {
     if (i === 0) bars += `<span class="hr" style="left:${pos(now)}%;background:#ffffff55"></span>`;
     rows += `<div class="tl-row"><div class="lb">${i === 0 ? 'Hoy' : i === 1 ? 'Ayer' : shortDay(ds)}</div><div class="tl-bar">${bars}</div></div>`;
   }
+  h += feedSection(from, to, nd);
   h += `<div class="section-title">Últimos 7 días</div><div class="card tl">${rows}
     <div class="tl-axis"><div></div><div><span>0h</span><span>6h</span><span>12h</span><span>18h</span><span>24h</span></div></div>
     <div class="legend"><span><span class="dot" style="background:var(--c-sueno)"></span>Sueño</span><span><span class="dot" style="background:var(--c-pecho)"></span>Pecho</span><span><span class="dot" style="background:var(--c-biberon)"></span>Biberón</span><span><span class="dot" style="background:var(--c-panal)"></span>Pañal</span><span><span class="dot" style="background:var(--c-regurg)"></span>Regurgitación</span></div>
@@ -554,6 +556,9 @@ function viewSettings() {
     <div class="field"><label>Fecha y hora de nacimiento</label><input class="input" id="s-nac" type="datetime-local" value="${b.nacimiento ? toLocalInput(b.nacimiento) : ''}"></div>
     <div class="field"><label>Sexo (para las curvas de la OMS)</label>
       <div class="grid2"><button class="opt ${b.sexo === 'nino' ? 'on' : ''}" data-action="pick-sexo" data-v="nino">Niño</button><button class="opt ${b.sexo === 'nina' ? 'on' : ''}" data-action="pick-sexo" data-v="nina">Niña</button></div></div>
+    <div class="field"><label>Máximo de horas entre tomas (desde el inicio de una al de la siguiente)</label><input class="input" id="s-maxh" inputmode="decimal" value="${String(b.maxEntreTomas ?? 3).replace('.', ',')}">
+      <div class="faint" style="font-size:12px;margin-top:6px">La AEP recomienda que el recién nacido no pase más de 3 h sin comer, también de noche. Ajústalo si el pediatra os indica otra cosa.</div></div>
+    <div class="field"><label>Avisar si se pasa ese tiempo sin comer</label>${pickPlain2('s-avisotoma', b.avisoTomas ? '1' : '0', [['1', 'Sí'], ['0', 'No']])}</div>
     <div class="field"><label>Medicación diaria a recordar (vacío para ocultar)</label><input class="input" id="s-med" value="${esc(b.medDiaria ?? 'Vitamina D')}"></div>
     <button class="btn primary block" data-action="save-baby">Guardar</button>
   </div>
@@ -636,6 +641,20 @@ function afterRender() {
         { label: 'Cacas', data: s.map((x) => x.caca), backgroundColor: '#c99a5b', borderRadius: 6 },
       ] },
       options: { maintainAspectRatio: false, plugins: { legend: { labels: { boxWidth: 10, boxHeight: 10 } } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } }, x: { grid: { display: false } } } },
+    }));
+  }
+  if ($('#ch-intervalos')) {
+    const now = Date.now();
+    const ranges = { hoy: dayStart(now), '24h': now - DAY, '7d': dayStart(now) - 6 * DAY };
+    const fs = feedStats(ranges[S.rango], now);
+    const maxH = S.baby?.maxEntreTomas || 3;
+    charts.push(new Chart($('#ch-intervalos'), {
+      type: 'bar',
+      data: { labels: fs.pairs.map((x) => (S.rango === '7d' ? `${shortDay(x.t)} ${fmtTime(x.t)}` : fmtTime(x.t))), datasets: [
+        { label: 'Horas desde la toma anterior', data: fs.pairs.map((x) => +(x.gap / HOUR).toFixed(2)), backgroundColor: fs.pairs.map((x) => (x.gap > maxH * HOUR ? css('--warn') : css('--c-pecho'))), borderRadius: 4 },
+      ] },
+      options: { maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => fmtDur(c.parsed.y * HOUR) } } },
+        scales: { y: { beginAtZero: true, title: { display: true, text: 'horas' } }, x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } } } },
     }));
   }
   if ($('#ch-sueno')) {
@@ -939,7 +958,7 @@ const actions = {
   'save-baby': () => {
     const nombre = $('#s-nombre').value.trim();
     const nac = fromLocalInput($('#s-nac').value);
-    const data = { nombre, medDiaria: $('#s-med').value.trim() };
+    const data = { nombre, medDiaria: $('#s-med').value.trim(), maxEntreTomas: num($('#s-maxh').value) || 3, avisoTomas: $('[data-action="pick-generic"][data-group="s-avisotoma"].on')?.dataset.v === '1' };
     if (!isNaN(nac)) data.nacimiento = nac;
     const sexo = S._sexo || S.baby?.sexo;
     if (sexo) data.sexo = sexo;
@@ -1501,3 +1520,94 @@ function handleMedIntent(it, v) {
   const st = statusOf(pl, now + 1000);
   return say(`${pl.nombre} apuntado${st.proxima && st.estado === 'pendiente' ? `. La siguiente, a las ${fmtTime(st.proxima)}` : ''}`);
 }
+
+// ---------------------------------------------------------------- análisis de tomas
+// El intervalo entre tomas se cuenta desde el INICIO de una toma hasta el INICIO de la siguiente.
+function pickPlain2(group, value, opts) {
+  return `<div class="grid${opts.length}">${opts.map(([v, l]) => `<button type="button" class="opt ${String(value) === v ? 'on' : ''}" data-action="pick-generic" data-group="${group}" data-v="${v}">${l}</button>`).join('')}</div>`;
+}
+actions['pick-generic'] = (b) => { document.querySelectorAll(`[data-action="pick-generic"][data-group="${b.dataset.group}"]`).forEach((x) => x.classList.toggle('on', x === b)); };
+
+const isFeed = (e) => e.tipo === 'pecho' || e.tipo === 'biberon';
+function feedStats(from, to) {
+  const feeds = S.events.filter((e) => isFeed(e) && e.t >= from - 8 * HOUR && e.t < to).sort((a, b) => a.t - b.t);
+  const pairs = [];
+  for (let i = 1; i < feeds.length; i++) {
+    const gap = feeds[i].t - feeds[i - 1].t;
+    if (feeds[i].t >= from && gap > 0 && gap < 8 * HOUR) pairs.push({ t: feeds[i].t, gap });
+  }
+  const inWin = feeds.filter((e) => e.t >= from);
+  const pecho = inWin.filter((e) => e.tipo === 'pecho');
+  const dur = pecho.map((e) => (e.segIzq || 0) + (e.segDer || 0)).filter((x) => x > 0);
+  const izq = pecho.map((e) => e.segIzq || 0).filter((x) => x > 0);
+  const der = pecho.map((e) => e.segDer || 0).filter((x) => x > 0);
+  const bib = inWin.filter((e) => e.tipo === 'biberon').map((e) => +e.ml || 0).filter((x) => x > 0);
+  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+  const gaps = pairs.map((x) => x.gap);
+  return {
+    pairs, n: inWin.length,
+    intervalo: avg(gaps), minI: gaps.length ? Math.min(...gaps) : 0, maxI: gaps.length ? Math.max(...gaps) : 0,
+    durMedia: avg(dur), izqMedia: avg(izq), derMedia: avg(der), izqN: izq.length, derN: der.length,
+    ambos: pecho.filter((e) => e.segIzq > 0 && e.segDer > 0).length, pechoN: pecho.length,
+    mlMedio: avg(bib), bibN: bib.length,
+  };
+}
+
+function nextFeedInfo(now = Date.now()) {
+  const last = S.events.find(isFeed);
+  if (!last) return null;
+  const maxH = S.baby?.maxEntreTomas || 3;
+  const limite = last.t + maxH * HOUR;
+  const fs = feedStats(now - DAY, now);
+  const estimada = fs.pairs.length >= 3 ? last.t + fs.intervalo : null;
+  return { last, limite, estimada, ritmo: fs.pairs.length >= 3 ? fs.intervalo : null, maxH };
+}
+
+function nextFeedCard() {
+  const now = Date.now();
+  const nf2 = nextFeedInfo(now);
+  if (!nf2) return '';
+  const { limite, estimada, ritmo, maxH, last } = nf2;
+  const pasado = now > limite;
+  const objetivo = estimada && estimada < limite ? estimada : limite;
+  const v = pasado ? `+${fmtDur(now - limite)}` : objetivo > now ? `en ${fmtDur(objetivo - now)}` : 'ya';
+  const sub = pasado
+    ? `Han pasado más de ${String(maxH).replace('.', ',')} h desde el inicio de la última toma (${fmtTime(last.t)})`
+    : `${estimada && estimada < limite ? `Por su ritmo ≈ ${fmtTime(estimada)} (cada ${fmtDur(ritmo)})` : `Desde el inicio de la última (${fmtTime(last.t)})`} · máx. ${fmtTime(limite)}`;
+  return `<button class="stat wide" data-action="tab" data-tab="resumen" style="min-height:0;flex-direction:row;align-items:center;justify-content:space-between;gap:10px">
+    <span style="min-width:0"><span class="k"><span class="dot" style="background:${pasado ? 'var(--warn)' : 'var(--c-pecho)'}"></span>Siguiente toma</span><span class="d">${sub}</span></span>
+    <span class="v" style="font-size:18px;white-space:nowrap;color:${pasado ? 'var(--warn)' : 'var(--text)'}">${v}</span></button>`;
+}
+
+function feedSection(from, to, nd) {
+  const fs = feedStats(from, to);
+  if (!fs.n) return '';
+  const m = (c, k, v, d) => `<div class="metric"><div class="k"><span class="dot" style="background:${c}"></span>${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
+  const porDia = nd > 1 ? fs.n / nd : fs.n;
+  const enRango = porDia >= 8 && porDia <= 12;
+  let h = `<div class="section-title">Lactancia</div><div class="metrics">
+    ${m('var(--c-pecho)', 'Pide cada', fs.intervalo ? fmtDur(fs.intervalo) : '—', fs.pairs.length > 1 ? `entre ${fmtDur(fs.minI)} y ${fmtDur(fs.maxI)}` : 'de inicio a inicio')}
+    ${m('var(--c-pecho)', 'Tomas al día', nf(porDia, nd > 1 ? 1 : 0), nd > 1 || S.rango === '24h' ? (enRango ? 'dentro de 8–12 (AEP)' : '<span style="color:var(--warn)">recomendado 8–12</span>') : 'recomendado 8–12 al día')}
+    ${m('var(--c-pecho)', 'Duración media', fs.durMedia ? fmtDur(fs.durMedia) : '—', fs.pechoN ? `${fs.ambos} de ${fs.pechoN} con los dos pechos` : 'sin tomas de pecho')}
+    ${m('var(--c-pecho)', 'Por pecho', fs.izqN || fs.derN ? `${fmtDur(fs.izqMedia).replace(' min', '′')} · ${fmtDur(fs.derMedia).replace(' min', '′')}` : '—', `izq. (${fs.izqN}) · der. (${fs.derN})`)}
+    ${fs.bibN ? m('var(--c-biberon)', 'Biberón medio', `${nf(fs.mlMedio)} ml`, pl(fs.bibN, 'biberón', 'biberones')) : ''}
+  </div>`;
+  if (fs.pairs.length) h += `<div class="card"><h2>Tiempo entre tomas</h2><div class="chart-box"><canvas id="ch-intervalos"></canvas></div>
+    <div class="legend"><span><span class="dot" style="background:var(--warn)"></span>Más de ${String(S.baby?.maxEntreTomas || 3).replace('.', ',')} h</span><span>Se cuenta desde el inicio de cada toma</span></div></div>`;
+  return h;
+}
+
+// Aviso si pasa el máximo sin comer (opcional, en Ajustes)
+function checkFeedAlert() {
+  if (!S.user || S.access !== 'ok' || !S.baby?.avisoTomas || S.active.pecho) return;
+  const nf2 = nextFeedInfo();
+  if (!nf2 || Date.now() < nf2.limite) return;
+  const key = `toma:${nf2.last.id}`;
+  const alerted = loadJson(ALERT_KEY, []);
+  if (alerted.includes(key)) return;
+  saveJson(ALERT_KEY, alerted.concat([key]).slice(-300));
+  notify('🍼 Hora de la toma', `Han pasado ${String(nf2.maxH).replace('.', ',')} h desde el inicio de la última toma (${fmtTime(nf2.last.t)})`, 'toma');
+  alarmSound();
+  toast(`Han pasado ${String(nf2.maxH).replace('.', ',')} h desde la última toma`);
+}
+setInterval(checkFeedAlert, 30000);
