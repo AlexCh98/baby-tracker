@@ -37,6 +37,10 @@ export function parseCommand(raw) {
   // Deshacer
   if (has(t, 'deshaz', 'deshacer', 'anula', 'borra (lo|el) ultimo', 'me he equivocado')) return { type: 'deshacer' };
 
+  // Medicación: "se ha tomado el paracetamol", "le he dado la vitamina"
+  if (has(t, 'tomad[oa]', 'me he tomado', 'se ha tomado', 'ya se tomo', 'he dado', 'le he dado', 'dad[oa]') && !has(t, 'cuando')) return { type: 'med-tomada', texto: t };
+  if (has(t, 'medicin\\w*', 'medicament\\w*', 'pastilla\\w*')) return { type: 'q-med' };
+
   // Preguntas
   if (has(t, 'que pecho', 'cual (le )?toca', 'que lado')) return { type: 'q-pecho' };
   if (has(t, 'cuanto lleva', 'cuanto tiempo lleva')) return { type: 'q-duracion' };

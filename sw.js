@@ -1,8 +1,8 @@
 // Service worker: guarda la app para que abra sin conexión.
 // Sube el número de versión al publicar cambios para que los móviles se actualicen.
-const CACHE = 'monitor-bebe-v4';
+const CACHE = 'monitor-bebe-v5';
 const ASSETS = [
-  './', './index.html', './styles.css', './app.js', './store.js', './config.js', './who.js', './voice.js',
+  './', './index.html', './styles.css', './app.js', './store.js', './config.js', './who.js', './voice.js', './meds.js',
   './manifest.webmanifest', './lib/firebase-app.js', './lib/firebase-auth.js', './lib/firebase-firestore.js',
   './lib/chart.umd.js', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
 ];
@@ -30,4 +30,13 @@ self.addEventListener('fetch', (e) => {
       })
       .catch(() => caches.match(req, { ignoreSearch: true }).then((r) => r || caches.match('./index.html')))
   );
+});
+
+// Al tocar un aviso, abrir (o traer al frente) la app.
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+    const c = list.find((x) => x.url.includes(self.registration.scope));
+    return c ? c.focus() : self.clients.openWindow('./');
+  }));
 });

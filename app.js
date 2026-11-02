@@ -1,5 +1,6 @@
 import { createStore } from './store.js';
 import { WHO } from './who.js';
+import { PERSONAS, planSlots, planStatus, describePlan, planIcs, parseHoras } from './meds.js';
 import { createVoice, voiceSupported, parseCommand, findNumber, norm } from './voice.js';
 
 // ---------------------------------------------------------------- utilidades
@@ -111,7 +112,7 @@ function describe(e) {
       s = p.join(' · ');
       break;
     }
-    case 'medicacion': s = [e.nombre, e.dosis].filter(Boolean).join(' · '); break;
+    case 'medicacion': s = [e.nombre, e.dosis, e.persona === 'mama' ? 'mamá' : ''].filter(Boolean).join(' · '); break;
     case 'temperatura': s = `${nf(e.grados, 1)} ºC`; break;
     case 'nota': s = e.texto || ''; break;
     case 'bano': s = ''; break;
@@ -125,11 +126,11 @@ function trasToma(t) {
   const g = t - (f.fin || f.t);
   return g < 6 * HOUR ? g : null;
 }
-const evTitle = (e) => (e.tipo === 'pecho' && e.lado ? `Pecho · terminó ${LADO[e.lado].toLowerCase()}` : T[e.tipo]?.label || e.tipo);
+const evTitle = (e) => (e.tipo === 'pecho' && e.lado ? `Pecho · terminó ${LADO[e.lado].toLowerCase()}` : e.tipo === 'medicacion' && e.estado === 'saltada' ? 'Medicación · saltada' : T[e.tipo]?.label || e.tipo);
 
 // ---------------------------------------------------------------- estado
 const S = {
-  store: null, user: undefined, baby: null, active: {}, events: [], measures: [],
+  store: null, user: undefined, baby: null, active: {}, events: [], measures: [], plans: [],
   tab: 'inicio', filtro: 'todo', rango: 'hoy', medida: 'peso',
   sync: { pending: false, online: true }, error: null, loaded: false, lastAdded: null,
   voice: { enabled: false, state: 'apagado' },
@@ -153,7 +154,7 @@ async function start() {
     unsubs = [];
     S.user = u;
     S.error = null;
-    S.baby = null; S.active = {}; S.events = []; S.measures = []; S.loaded = false;
+    S.baby = null; S.active = {}; S.events = []; S.measures = []; S.plans = []; S.loaded = false;
     S.access = !u ? null : S.store.mode === 'demo' || wasVerified(u.email) ? 'ok' : 'checking';
     if (u) subscribe();
     render();
@@ -181,6 +182,7 @@ function subscribe() {
   unsubs.push(S.store.watchState((a) => { S.active = a || {}; render(); }, err));
   unsubs.push(S.store.watchEvents(since, (ev) => { S.events = ev; S.loaded = true; render(); }, err));
   unsubs.push(S.store.watchMeasures((m) => { S.measures = m; render(); }, err));
+  unsubs.push(S.store.watchPlans((pl) => { S.plans = pl; render(); checkMedAlerts(); }, err));
 }
 
 // Acceso: solo las cuentas permitidas por las reglas de Firestore pueden ver la app.
@@ -218,7 +220,7 @@ function render() {
   dirty = false;
   charts.forEach((c) => c.destroy());
   charts = [];
-  const views = { inicio: viewHome, historial: viewHistory, resumen: viewSummary, crecimiento: viewGrowth, ajustes: viewSettings };
+  const views = { inicio: viewHome, historial: viewHistory, resumen: viewSummary, crecimiento: viewGrowth, medicinas: viewMeds, ajustes: viewSettings };
   const scroll = window.scrollY;
   app.innerHTML = `
     ${header()}
@@ -245,7 +247,7 @@ function header() {
 }
 
 function nav() {
-  const items = [['inicio', '🏠', 'Inicio'], ['historial', '🗒️', 'Historial'], ['resumen', '📊', 'Resumen'], ['crecimiento', '📈', 'Crecimiento'], ['ajustes', '⚙️', 'Ajustes']];
+  const items = [['inicio', '🏠', 'Inicio'], ['historial', '🗒️', 'Historial'], ['resumen', '📊', 'Resumen'], ['crecimiento', '📈', 'Peso'], ['medicinas', '💊', 'Medicinas'], ['ajustes', '⚙️', 'Ajustes']];
   return `<nav class="nav">${items.map(([k, i, l]) => `<button data-action="tab" data-tab="${k}" class="${S.tab === k ? 'on' : ''}"><span class="i">${i}</span>${l}</button>`).join('')}</nav>`;
 }
 
@@ -319,9 +321,11 @@ function viewHome() {
       <span class="v" style="font-size:18px" data-ago="${lastSueno.fin}">${fmtAgo(lastSueno.fin)}</span></div>` : ''}
   </div>`;
 
+  h += homeMeds();
+
   // Medicación diaria
   const med = (S.baby?.medDiaria ?? 'Vitamina D').trim();
-  if (med) {
+  if (med && !S.plans.some((pl) => norm(pl.nombre) === norm(med))) {
     const d0 = dayStart(Date.now());
     const dada = S.events.find((e) => e.tipo === 'medicacion' && e.t >= d0 && (e.nombre || '').toLowerCase() === med.toLowerCase());
     h += `<button class="daily ${dada ? 'done' : ''}" data-action="${dada ? 'edit' : 'daily-med'}" data-id="${esc(dada?.id || '')}">
@@ -361,6 +365,7 @@ function viewHome() {
 
 function tick() {
   const now = Date.now();
+  if (now % 15000 < 1000) checkMedAlerts();
   const p = S.active.pecho;
   if (p) {
     const t = pechoTimes(p, now);
@@ -1060,6 +1065,7 @@ function sugeridoPecho() {
 
 function handleIntent(it, v) {
   const say = (t) => v.speak(t);
+  if (it.type === 'med-tomada' || it.type === 'q-med') return handleMedIntent(it, v);
   const now = Date.now();
   const p = S.active.pecho, sl = S.active.sueno;
   const ladoTxt = (l) => LADO[l].toLowerCase();
@@ -1194,3 +1200,304 @@ const voice = voiceSupported ? createVoice({
 }) : null;
 if (voice && voicePrefs().auto) setTimeout(() => { if (S.user) voice.enable(); }, 1500);
 window.addEventListener('store-error', (e) => fail(e.detail));
+
+// ---------------------------------------------------------------- medicación
+const medLogs = (pl) => S.events.filter((e) => e.tipo === 'medicacion' && e.planId === pl.id);
+const statusOf = (pl, now = Date.now()) => planStatus(pl, medLogs(pl), now);
+const enTiempo = (t, now = Date.now()) => (t >= now ? `en ${fmtDur(t - now)}` : `hace ${fmtDur(now - t)}`);
+const horaDia = (t) => (dayStart(t) === dayStart(Date.now()) ? `a las ${fmtTime(t)}` : `${dayLabel(t).toLowerCase()} a las ${fmtTime(t)}`);
+
+function medStatusLine(st, now = Date.now()) {
+  if (st.estado === 'toca') return `<span style="color:var(--warn)">⏰ Tocaba ${horaDia(st.proxima)} (${enTiempo(st.proxima, now)})</span>${st.perdidas ? ` <span class="faint">· ${st.perdidas} anterior${st.perdidas > 1 ? 'es' : ''} sin marcar</span>` : ''}`;
+  if (st.estado === 'pendiente') return `Próxima: <b>${horaDia(st.proxima)}</b> <span class="faint">(${enTiempo(st.proxima, now)})</span>`;
+  if (st.estado === 'pausada') return '<span class="faint">En pausa</span>';
+  if (st.estado === 'terminada') return '<span class="faint">Tratamiento terminado</span>';
+  return '<span class="faint">Sin dosis próximas</span>';
+}
+
+function medRow(pl, compact) {
+  const st = statusOf(pl);
+  const can = st.estado === 'toca' || st.estado === 'pendiente';
+  return `<div class="med ${st.estado === 'toca' ? 'due' : ''}">
+    <button class="med-main" data-action="med-edit" data-id="${esc(pl.id)}">
+      <span class="who-tag ${pl.persona}">${PERSONAS[pl.persona] || ''}</span>
+      <div class="t1">${esc(pl.nombre)}${pl.dosis ? ` <span class="muted" style="font-weight:400">· ${esc(pl.dosis)}</span>` : ''}</div>
+      ${compact ? '' : `<div class="t2">${esc(describePlan(pl))}</div>`}
+      <div class="t2">${medStatusLine(st)}</div>
+    </button>
+    ${can ? `<div class="med-btns">
+      <button class="btn ${st.estado === 'toca' ? 'c' : ''}" style="--c:var(--ok)" data-action="med-take" data-id="${esc(pl.id)}">✓ Tomada</button>
+      ${compact ? '' : `<button class="btn" data-action="med-skip" data-id="${esc(pl.id)}">Saltar</button>`}
+    </div>` : ''}
+  </div>`;
+}
+
+function homeMeds() {
+  const now = Date.now();
+  const rows = S.plans.filter((pl) => pl.activo !== false)
+    .map((pl) => ({ pl, st: statusOf(pl, now) }))
+    .filter(({ st }) => st.estado === 'toca' || (st.estado === 'pendiente' && st.proxima - now < 12 * HOUR))
+    .sort((a, b) => a.st.proxima - b.st.proxima)
+    .slice(0, 4);
+  if (!rows.length) return '';
+  return `<div class="section-title">Medicación <button data-action="tab" data-tab="medicinas">Ver todo</button></div>
+    <div class="card" style="padding:4px 12px">${rows.map(({ pl }) => medRow(pl, true)).join('')}</div>`;
+}
+
+function notifState() {
+  if (!('Notification' in window)) return 'no';
+  return Notification.permission;
+}
+
+function viewMeds() {
+  const ns = notifState();
+  let h = '';
+  if (ns === 'default') h += `<div class="banner info">Activa los avisos para que el móvil te avise cuando toque cada medicamento.<button class="btn primary block" style="margin-top:10px" data-action="notif-enable">🔔 Activar avisos</button></div>`;
+  else if (ns === 'denied') h += `<div class="banner warn">Los avisos están bloqueados para esta web. Actívalos en los ajustes del navegador (permisos del sitio → Notificaciones).</div>`;
+  else if (ns === 'no') h += `<div class="banner warn">Este navegador no permite notificaciones. En iPhone hay que instalar la app en la pantalla de inicio. Puedes usar “Añadir al calendario” en cada medicamento.</div>`;
+
+  for (const who of ['mama', 'bebe']) {
+    const list = S.plans.filter((pl) => pl.persona === who).sort((a, b) => (a.activo === false) - (b.activo === false) || a.nombre.localeCompare(b.nombre));
+    h += `<div class="section-title">${who === 'mama' ? '👩 Mamá' : '👶 Bebé'}</div>`;
+    h += list.length ? `<div class="card" style="padding:4px 12px">${list.map((pl) => medRow(pl)).join('')}</div>`
+      : `<div class="card empty" style="padding:18px">Sin medicamentos</div>`;
+  }
+  h += `<button class="btn primary block" data-action="med-new">＋ Añadir medicamento</button>`;
+
+  const recent = S.events.filter((e) => e.tipo === 'medicacion').slice(0, 10);
+  if (recent.length) h += `<div class="section-title">Últimas tomas</div><div class="card" style="padding:4px 12px">${recent.map((e) => evRow(e).replace(fmtTime(e.t) + '<', `${shortDay(e.t)}<br><span class="faint">${fmtTime(e.t)}</span><`)).join('')}</div>`;
+
+  h += `<p class="faint" style="font-size:13px;text-align:center;margin-top:16px">Los avisos saltan con la app abierta o recién usada. Para alarmas con el móvil bloqueado, usa “Añadir al calendario” en cada medicamento.</p>`;
+  if (ns === 'granted') h += `<button class="link" data-action="notif-test">Probar aviso</button>`;
+  return h;
+}
+
+function openPlanForm(pl) {
+  const e = pl || {};
+  const now = Date.now();
+  const r = new Date(now); r.setMinutes(Math.round(r.getMinutes() / 5) * 5, 0, 0);
+  const modo = e.modo || 'intervalo';
+  const body = `
+    <div class="field"><label>Para</label>${pick('persona', e.persona || 'mama', [['mama', 'Mamá', '👩'], ['bebe', 'Bebé', '👶']])}</div>
+    <div class="field"><label>Medicamento</label><input class="input" name="nombre" list="meds-list" value="${esc(e.nombre || '')}" placeholder="p. ej. Paracetamol">
+      <datalist id="meds-list">${['Paracetamol', 'Ibuprofeno', 'Hierro', 'Enoxaparina (Clexane)', 'Omeprazol', 'Vitamina D', 'Antibiótico', 'Metamizol (Nolotil)'].map((x) => `<option>${x}</option>`).join('')}</datalist></div>
+    <div class="field"><label>Dosis (opcional)</label><input class="input" name="dosis" value="${esc(e.dosis || '')}" placeholder="p. ej. 1 g, 1 comprimido, 2 gotas"></div>
+    <div class="field"><label>Frecuencia</label>${pick('modo', modo, [['intervalo', 'Cada X horas'], ['horas', 'A horas fijas']])}</div>
+    <div id="f-intervalo" class="${modo === 'horas' ? 'hidden' : ''}">
+      <div class="field"><label>Cada cuántas horas</label><input class="input" name="cadaH" inputmode="decimal" value="${e.cadaH ?? 8}">
+        <div class="chip-row" style="margin-top:8px">${[4, 6, 8, 12, 24].map((v) => `<button type="button" class="chip" data-fill="cadaH" data-v="${v}">${v} h</button>`).join('')}</div></div>
+      ${timeField(e.inicio || r.getTime(), 'Primera toma', 'inicio', false)}
+      <div class="field"><label>Las siguientes se cuentan…</label>${pick('desdeToma', e.desdeToma ? '1' : '0', [['0', 'Horario fijo'], ['1', 'Desde la toma real']])}
+        <div class="faint" style="font-size:12px;margin-top:6px">Horario fijo: como en el hospital (6, 14, 22 h). Desde la toma real: si se retrasa, la siguiente también.</div></div>
+    </div>
+    <div id="f-horas" class="${modo === 'horas' ? '' : 'hidden'}">
+      <div class="field"><label>Horas (separadas por comas)</label><input class="input" name="horas" value="${esc((e.horas || ['09:00', '21:00']).join(', '))}" placeholder="9:00, 21:00"></div>
+      <div class="field"><label>Empieza</label><input class="input" type="date" name="desde" value="${toLocalInput(e.inicio || now).slice(0, 10)}"></div>
+    </div>
+    <div class="field"><label>Duración en días (vacío = sin fin)</label><input class="input" name="dias" inputmode="numeric" value="${e.dias ?? ''}" placeholder="Sin fin">
+      <div class="chip-row" style="margin-top:8px">${[3, 5, 7, 10, 14, 30].map((v) => `<button type="button" class="chip" data-fill="dias" data-v="${v}">${v} días</button>`).join('')}</div></div>
+    <div class="field"><label>Notas (opcional)</label><input class="input" name="notas" value="${esc(e.notas || '')}" placeholder="p. ej. con comida, máximo 3 al día"></div>
+    ${pl ? '' : `<div class="field"><label>Si la última dosis ya pasó, ¿ya se la ha tomado?</label>${pick('yaTomada', '1', [['1', 'Sí, ya tomada'], ['0', 'No, avísame']])}</div>`}
+    ${pl ? `<div class="field"><label>Estado</label>${pick('activo', e.activo === false ? '0' : '1', [['1', 'Activo'], ['0', 'En pausa']])}</div>
+      <button type="button" class="btn block" style="margin-bottom:12px" data-action="med-ics" data-id="${esc(pl.id)}">📅 Añadir alarmas al calendario</button>` : ''}`;
+
+  const form = openSheet(pl ? 'Editar medicamento' : 'Nuevo medicamento', body, {
+    icon: '<span style="font-size:26px">💊</span>',
+    onSave: (f) => {
+      const nombre = f.nombre.value.trim();
+      if (!nombre) return toast('Indica el medicamento', true), false;
+      const plan = { persona: f.persona.value, nombre, dosis: f.dosis.value.trim(), modo: f.modo.value, notas: f.notas.value.trim(),
+        dias: num(f.dias.value) || null, activo: pl ? f.activo.value === '1' : true, actualizado: Date.now(), autor: me() };
+      if (plan.modo === 'horas') {
+        plan.horas = parseHoras(f.horas.value);
+        if (!plan.horas.length) return toast('Escribe al menos una hora, p. ej. 9:00', true), false;
+        const d = f.desde.value ? new Date(f.desde.value + 'T00:00') : new Date();
+        d.setHours(0, 0, 0, 0); plan.inicio = d.getTime();
+        plan.cadaH = null; plan.desdeToma = false;
+      } else {
+        plan.cadaH = num(f.cadaH.value);
+        if (!plan.cadaH || plan.cadaH < 0.5 || plan.cadaH > 168) return toast('Indica cada cuántas horas', true), false;
+        plan.inicio = fromLocalInput(f.inicio.value);
+        if (isNaN(plan.inicio)) return toast('Revisa la hora de la primera toma', true), false;
+        plan.desdeToma = f.desdeToma.value === '1';
+        plan.horas = null;
+      }
+      if (pl) plan.id = pl.id;
+      S.quietUntil = Date.now() + 4000;
+      run(S.store.savePlan(plan)).then((res) => {
+        toast(pl ? 'Guardado' : `${nombre} añadido`);
+        if (!pl && res && res.id && f.yaTomada.value === '1') {
+          const st = planStatus({ ...plan, id: res.id }, [], Date.now());
+          if (st.estado === 'toca') addEv({ tipo: 'medicacion', planId: res.id, nombre, dosis: plan.dosis, persona: plan.persona, estado: 'tomada', programada: st.proxima, t: st.proxima, autor: me() });
+        }
+      });
+      if (!pl && notifState() === 'default') setTimeout(() => actions['notif-enable'](), 600);
+    },
+    onDelete: pl ? () => { run(S.store.deletePlan(pl.id)); toast('Medicamento eliminado'); } : null,
+  });
+  form.addEventListener('change', () => {
+    const h = form.modo.value === 'horas';
+    $('#f-intervalo', form).classList.toggle('hidden', h);
+    $('#f-horas', form).classList.toggle('hidden', !h);
+  });
+}
+
+function logDose(pl, estado) {
+  const st = statusOf(pl);
+  const now = Date.now();
+  const programada = st.proxima && (st.estado === 'toca' || st.proxima - now < 3 * HOUR) ? st.proxima : now;
+  vibrate();
+  addEv({ tipo: 'medicacion', planId: pl.id, nombre: pl.nombre, dosis: pl.dosis || '', persona: pl.persona, estado, programada, t: now, autor: me() });
+  clearAlertFor(pl.id);
+}
+
+Object.assign(actions, {
+  'med-new': () => openPlanForm(),
+  'med-edit': (b) => { const pl = S.plans.find((x) => x.id === b.dataset.id); if (pl) openPlanForm(pl); },
+  'med-take': (b) => {
+    const pl = S.plans.find((x) => x.id === b.dataset.id); if (!pl) return;
+    logDose(pl, 'tomada'); toast(`${pl.nombre} · tomada`); refreshMedAlert();
+  },
+  'med-skip': (b) => {
+    const pl = S.plans.find((x) => x.id === b.dataset.id); if (!pl) return;
+    if (!confirm(`¿Saltar esta dosis de ${pl.nombre}?`)) return;
+    logDose(pl, 'saltada'); toast('Dosis saltada'); refreshMedAlert();
+  },
+  'med-snooze': (b) => {
+    const key = b.dataset.key;
+    const sn = loadJson(SNOOZE_KEY, {}); sn[key] = Date.now() + 15 * MIN; saveJson(SNOOZE_KEY, sn);
+    const al = loadJson(ALERT_KEY, []); saveJson(ALERT_KEY, al.filter((k) => k !== key));
+    toast('Te aviso en 15 minutos'); refreshMedAlert();
+  },
+  'med-ics': async (b) => {
+    const pl = S.plans.find((x) => x.id === b.dataset.id); if (!pl) return;
+    const { text, count, hasta } = planIcs(pl);
+    if (!count) return toast('No hay dosis próximas que añadir', true);
+    const name = `${norm(pl.nombre).replace(/\s+/g, '-') || 'medicamento'}.ics`;
+    const file = new File([text], name, { type: 'text/calendar' });
+    toast(`${count} alarmas hasta el ${new Date(hasta).getDate()}/${new Date(hasta).getMonth() + 1}`);
+    try {
+      if (/iPhone|iPad/.test(navigator.userAgent)) { location.href = URL.createObjectURL(file); return; }
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
+    } catch (e) { if (e.name === 'AbortError') return; }
+    const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name; a.click();
+  },
+  'notif-enable': async () => {
+    if (!('Notification' in window)) return toast('Este navegador no admite avisos', true);
+    const r = await Notification.requestPermission();
+    toast(r === 'granted' ? 'Avisos activados' : 'No se han activado los avisos', r !== 'granted');
+    render();
+  },
+  'notif-test': () => { notify('💊 Prueba de aviso', 'Así te avisaré cuando toque un medicamento.', 'test'); alarmSound(); },
+});
+
+function refreshMedAlert() { const r = $('#sheet-root'); if (r && r.dataset.kind === 'med-alert') setTimeout(showMedAlert, 150); }
+function closeSheetIf(kind) { const r = $('#sheet-root'); if (r && r.dataset.kind === kind) closeSheet(); }
+
+// ---- avisos
+const ALERT_KEY = 'monitor-bebe-avisos', SNOOZE_KEY = 'monitor-bebe-pospuestos';
+function loadJson(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } }
+function saveJson(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+function clearAlertFor(planId) {
+  const sn = loadJson(SNOOZE_KEY, {});
+  for (const k of Object.keys(sn)) if (k.startsWith(planId + ':')) delete sn[k];
+  saveJson(SNOOZE_KEY, sn);
+}
+
+async function notify(title, body, tag) {
+  if (notifState() !== 'granted') return;
+  const opts = { body, tag, renotify: true, requireInteraction: true, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', vibrate: [300, 150, 300, 150, 600] };
+  try {
+    const reg = 'serviceWorker' in navigator && (await navigator.serviceWorker.getRegistration());
+    if (reg) return reg.showNotification(title, opts);
+    new Notification(title, opts);
+  } catch {}
+}
+
+function alarmSound() {
+  try {
+    const ctx = alarmSound.ctx || (alarmSound.ctx = new (window.AudioContext || window.webkitAudioContext)());
+    [0, 0.35, 0.7].forEach((d) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.value = 988; o.type = 'triangle';
+      const t0 = ctx.currentTime + d;
+      g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.35, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.28);
+      o.connect(g).connect(ctx.destination); o.start(t0); o.stop(t0 + 0.3);
+    });
+  } catch {}
+  try { navigator.vibrate && navigator.vibrate([300, 150, 300, 150, 600]); } catch {}
+}
+
+function dueAlerts(now = Date.now()) {
+  const sn = loadJson(SNOOZE_KEY, {});
+  return S.plans.map((pl) => ({ pl, st: statusOf(pl, now) }))
+    .filter(({ st }) => st.estado === 'toca' && now - st.proxima <= 6 * HOUR)
+    .map((x) => ({ ...x, key: `${x.pl.id}:${x.st.proxima}` }))
+    .filter((x) => !(sn[x.key] && sn[x.key] > now));
+}
+
+function checkMedAlerts() {
+  if (!S.user || S.access !== 'ok' || !S.plans.length) return;
+  if (S.quietUntil && Date.now() < S.quietUntil) { setTimeout(checkMedAlerts, S.quietUntil - Date.now() + 50); return; }
+  const alerted = loadJson(ALERT_KEY, []);
+  const due = dueAlerts();
+  const fresh = due.filter((x) => !alerted.includes(x.key));
+  if (!fresh.length) return;
+  saveJson(ALERT_KEY, alerted.concat(fresh.map((x) => x.key)).slice(-300));
+  for (const { pl, st } of fresh) {
+    const quien = pl.persona === 'mama' ? 'Mamá' : S.baby?.nombre || 'Bebé';
+    notify(`💊 ${pl.nombre}${pl.dosis ? ' · ' + pl.dosis : ''}`, `${quien}: tocaba a las ${fmtTime(st.proxima)}`, `med-${pl.id}`);
+  }
+  alarmSound();
+  showMedAlert();
+}
+
+function showMedAlert() {
+  if (document.hidden) return;
+  const cur = $('#sheet-root');
+  if (cur && cur.dataset.kind !== 'med-alert') return; // no interrumpir un formulario
+  const due = dueAlerts();
+  if (!due.length) { closeSheetIf('med-alert'); return; }
+  const rows = due.map(({ pl, st, key }) => {
+    const quien = pl.persona === 'mama' ? 'Mamá' : S.baby?.nombre || 'Bebé';
+    return `<div class="card">
+      <span class="who-tag ${pl.persona}">${esc(quien)}</span>
+      <div style="font-size:19px;font-weight:700;margin-top:6px">${esc(pl.nombre)}${pl.dosis ? ` <span class="muted" style="font-weight:400">· ${esc(pl.dosis)}</span>` : ''}</div>
+      <div class="muted" style="margin-top:2px">Tocaba a las ${fmtTime(st.proxima)} (${enTiempo(st.proxima)})</div>
+      ${pl.notas ? `<div class="hint" style="margin-top:10px">${esc(pl.notas)}</div>` : ''}
+      <button type="button" class="btn c block" style="--c:var(--ok);margin-top:12px;padding:15px;font-size:17px" data-action="med-take" data-id="${esc(pl.id)}">✓ Tomada</button>
+      <div class="grid2" style="margin-top:8px"><button type="button" class="btn" data-action="med-snooze" data-key="${esc(key)}">⏰ +15 min</button><button type="button" class="btn" data-action="med-skip" data-id="${esc(pl.id)}">Saltar</button></div>
+    </div>`;
+  }).join('');
+  openSheet(due.length > 1 ? `Tocan ${due.length} medicamentos` : 'Toca medicamento', rows, { icon: '<span style="font-size:24px">💊</span>' });
+  const r = $('#sheet-root'); if (r) r.dataset.kind = 'med-alert';
+}
+
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkMedAlerts(); });
+
+function handleMedIntent(it, v) {
+  const say = (t) => v.speak(t);
+  const now = Date.now();
+  const activos = S.plans.filter((pl) => pl.activo !== false);
+  if (it.type === 'q-med') {
+    const rows = activos.map((pl) => ({ pl, st: statusOf(pl, now) })).filter((x) => x.st.proxima).sort((a, b) => a.st.proxima - b.st.proxima);
+    if (!rows.length) return say('No hay medicamentos pendientes');
+    const toca = rows.filter((x) => x.st.estado === 'toca');
+    if (toca.length) return say(`Toca ahora: ${toca.map((x) => `${x.pl.nombre} para ${x.pl.persona === 'mama' ? 'mamá' : 'el bebé'}`).join(', ')}`);
+    const n = rows[0];
+    return say(`El siguiente es ${n.pl.nombre} para ${n.pl.persona === 'mama' ? 'mamá' : 'el bebé'}, a las ${fmtTime(n.st.proxima)}, dentro de ${spokenDur(n.st.proxima - now)}`);
+  }
+  const t = it.texto;
+  const score = (pl) => norm(pl.nombre).split(' ').filter((w) => w.length > 2 && t.includes(w)).length;
+  let cands = activos.map((pl) => ({ pl, s: score(pl) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s);
+  if (!cands.length) {
+    if (t.includes('vitamina')) return handleIntent({ type: 'vitamina' }, v);
+    const due = activos.filter((pl) => statusOf(pl, now).estado === 'toca');
+    if (due.length === 1) cands = [{ pl: due[0] }];
+    else return say('No sé qué medicamento. Dime su nombre, por ejemplo: se ha tomado el paracetamol');
+  }
+  const pl = cands[0].pl;
+  logDose(pl, 'tomada');
+  const st = statusOf(pl, now + 1000);
+  return say(`${pl.nombre} apuntado${st.proxima && st.estado === 'pendiente' ? `. La siguiente, a las ${fmtTime(st.proxima)}` : ''}`);
+}

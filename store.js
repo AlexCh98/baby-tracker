@@ -26,6 +26,7 @@ async function createFirebaseStore(cfg) {
   const babyRef = F.doc(db, 'bebes', BABY);
   const stateRef = F.doc(db, 'bebes', BABY, 'estado', 'activo');
   const evCol = F.collection(db, 'bebes', BABY, 'eventos');
+  const planCol = F.collection(db, 'bebes', BABY, 'planes');
 
   let pending = false;
   const syncCbs = new Set();
@@ -71,6 +72,14 @@ async function createFirebaseStore(cfg) {
     },
     updateEvent: (id, p) => F.updateDoc(F.doc(evCol, id), p),
     deleteEvent: (id) => F.deleteDoc(F.doc(evCol, id)),
+    watchPlans: (cb, err) => F.onSnapshot(planCol, (s) => cb(docs(s)), err),
+    savePlan(plan) {
+      const { id, ...data } = plan;
+      const ref = id ? F.doc(planCol, id) : F.doc(planCol);
+      F.setDoc(ref, data).catch((e) => window.dispatchEvent(new CustomEvent('store-error', { detail: e })));
+      return Promise.resolve({ id: ref.id });
+    },
+    deletePlan: (id) => F.deleteDoc(F.doc(planCol, id)),
     async allEvents() {
       return docs(await F.getDocs(F.query(evCol, F.orderBy('t', 'asc'))));
     },
@@ -80,7 +89,7 @@ async function createFirebaseStore(cfg) {
 
 function createDemoStore() {
   const KEY = 'monitor-bebe-demo';
-  const fresh = () => ({ baby: null, state: {}, events: [] });
+  const fresh = () => ({ baby: null, state: {}, events: [], plans: [] });
   const load = () => {
     try { return Object.assign(fresh(), JSON.parse(localStorage.getItem(KEY)) || {}); } catch { return fresh(); }
   };
@@ -109,6 +118,14 @@ function createDemoStore() {
     updateEvent: async (id, p) => { const e = data.events.find((x) => x.id === id); if (e) Object.assign(e, p); save(); },
     deleteEvent: async (id) => { data.events = data.events.filter((x) => x.id !== id); save(); },
     allEvents: async () => copy(data.events).sort((a, b) => a.t - b.t),
+    watchPlans: (cb) => sub(() => cb(copy(data.plans || []))),
+    savePlan: async (plan) => {
+      data.plans = data.plans || [];
+      const id = plan.id || Math.random().toString(36).slice(2, 11);
+      data.plans = data.plans.filter((x) => x.id !== id).concat([{ ...plan, id }]);
+      save(); return { id };
+    },
+    deletePlan: async (id) => { data.plans = (data.plans || []).filter((x) => x.id !== id); save(); },
     onSync(cb) { cb({ pending: false, online: true }); },
   };
 }
