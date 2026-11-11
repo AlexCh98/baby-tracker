@@ -1,7 +1,7 @@
 import { createStore } from './store.js';
 import { WHO } from './who.js';
 import { PERSONAS, planSlots, planStatus, describePlan, planIcs, parseHoras, COMIDAS, HORAS_COMIDAS, horasDeComidas, comidaDe } from './meds.js';
-import { askGemini } from './ai.js';
+import { askGemini, listModels, testConnection } from './ai.js';
 import { createVoice, voiceSupported, parseCommand, findNumber, norm } from './voice.js';
 
 // ---------------------------------------------------------------- utilidades
@@ -592,13 +592,7 @@ function viewSettings() {
   </div>
 
   <div class="section-title">Asistente IA</div>
-  <div class="card">
-    ${aiCfg().key ? `<div class="kv"><span class="muted">Clave de Gemini</span><span>••••${esc(aiCfg().key.slice(-4))}</span></div>
-      <div class="field" style="margin-top:12px"><label>Modelo</label><input class="input" id="s-aimodel" value="${esc(aiCfg().modelo || 'gemini-flash-latest')}">
-        <div class="faint" style="font-size:12px;margin-top:6px">Si el modelo deja de existir, la app elige sola el Flash más reciente.</div></div>
-      <div class="grid2"><button class="btn danger" data-action="ai-delkey">Quitar clave</button><button class="btn primary" data-action="ai-savemodel">Guardar</button></div>`
-      : '<button class="btn primary block" data-action="tab" data-tab="asistente">Configurar el asistente</button>'}
-  </div>
+  <div class="card">${aiSettings()}</div>
 
   <div class="section-title">Datos</div>
   <div class="card">
@@ -2248,7 +2242,7 @@ function viewAI() {
   h += '<div class="chat">';
   chat.forEach((m, i) => {
     if (m.role === 'user') h += `<div class="msg user">${esc(m.text)}${m.fotos ? `<div class="faint" style="font-size:12px;margin-top:4px">📷 ${pl(m.fotos, "foto adjunta", "fotos adjuntas")}</div>` : ''}</div>`;
-    else if (m.error) h += `<div class="msg err">⚠️ ${esc(m.text)}</div>`;
+    else if (m.error) h += `<div class="msg err">⚠️ ${esc(m.text)}<div style="margin-top:6px;font-size:13px">Prueba la conexión en <button class="link" style="display:inline;margin:0;padding:0;color:inherit;text-decoration:underline" data-action="tab" data-tab="ajustes">⚙️ Ajustes → Asistente IA</button>.</div></div>`;
     else {
       const { texto, acciones } = splitActions(m.text);
       h += `<div class="msg ai">${mdLite(texto)}${acciones.map((a, j) => `<button class="act ${m.hechas?.includes(j) ? 'done' : ''}" data-action="ai-act" data-m="${i}" data-j="${j}" ${m.hechas?.includes(j) ? 'disabled' : ''}>${m.hechas?.includes(j) ? '✓ ' : '＋ '}${a.tipo === 'recordatorio' ? `🔔 ${esc(a.titulo || '')}${a.cuando ? ` · ${esc(String(a.cuando).replace('T', ' '))}` : ''}` : `📝 ${esc(a.texto || '')}`}</button>`).join('')}</div>`;
@@ -2307,6 +2301,7 @@ Object.assign(actions, {
     const key = $('#ai-key').value.trim();
     if (!/^AIza[\w-]{20,}$/.test(key)) return toast('Esa clave no parece válida (empieza por AIza…)', true);
     document.activeElement?.blur();
+    S.aiEditKey = false; S.aiModels = undefined; S.aiTest = null;
     run(S.store.saveIn('config', { id: 'ia', key, modelo: aiCfg().modelo || 'gemini-flash-latest' })).then(() => toast('Clave guardada'));
   },
   'ai-delkey': () => { if (confirm('¿Quitar la clave de Gemini?')) run(S.store.deleteIn('config', 'ia')); },
@@ -2326,4 +2321,63 @@ Object.assign(actions, {
     }
     m.hechas = [...(m.hechas || []), +b.dataset.j]; saveChat(); render();
   },
+});
+
+// ---- ajustes del asistente: clave, desplegable de modelos y prueba de conexión
+function aiSettings() {
+  const cfg = aiCfg();
+  const cur = cfg.modelo || 'gemini-flash-latest';
+  const models = Array.isArray(S.aiModels) ? S.aiModels : [];
+  const opts = [...models];
+  if (!opts.some((m) => m.id === cur)) opts.unshift({ id: cur, nombre: cur });
+  if (!opts.some((m) => m.id === 'gemini-flash-latest')) opts.unshift({ id: 'gemini-flash-latest', nombre: 'Flash más reciente (automático)' });
+  if (cfg.key && S.aiModels === undefined) setTimeout(loadAiModels, 0);
+  const t = S.aiTest;
+  return `
+    <div class="field"><label>Clave de Gemini</label>
+      ${cfg.key ? `<div class="kv" style="padding-top:0"><span>••••••••${esc(cfg.key.slice(-4))}</span><button class="link" style="margin:0;padding:0" data-action="ai-changekey">Cambiar</button></div>` : ''}
+      <div id="ai-keybox" class="${cfg.key && !S.aiEditKey ? 'hidden' : ''}">
+        <input class="input" id="ai-key" type="password" placeholder="AIza…" autocomplete="off">
+        <button class="btn primary block" style="margin-top:8px" data-action="ai-savekey">Guardar clave</button>
+        <div class="faint" style="font-size:12px;margin-top:6px">Consíguela en aistudio.google.com/apikey → Create API key.</div>
+      </div></div>
+    ${cfg.key ? `
+    <div class="field"><label>Modelo</label>
+      <select class="input" id="s-aimodel">${opts.map((m) => `<option value="${esc(m.id)}" ${m.id === cur ? 'selected' : ''}>${esc(m.id === 'gemini-flash-latest' ? 'Automático (Flash más reciente)' : m.nombre || m.id)}</option>`).join('')}</select>
+      <div class="faint" style="font-size:12px;margin-top:6px">${S.aiModels === 'loading' ? 'Cargando modelos disponibles…' : models.length ? `${models.length} modelos disponibles para tu clave. Recomendado: un “Flash”.` : S.aiModelsErr ? `<span style="color:var(--danger)">No se pudieron cargar los modelos: ${esc(S.aiModelsErr)}</span>` : ''}</div></div>
+    <div class="grid2">
+      <button class="btn" data-action="ai-loadmodels">🔄 Recargar lista</button>
+      <button class="btn primary" data-action="ai-test" ${t === 'loading' ? 'disabled' : ''}>${t === 'loading' ? 'Probando…' : '🧪 Probar conexión'}</button>
+    </div>
+    ${t && t !== 'loading' ? `<div class="banner ${t.ok ? 'info' : 'err'}" style="margin:12px 0 0">${t.ok ? `✅ Conectado con <b>${esc(t.model)}</b> en ${(t.ms / 1000).toFixed(1).replace('.', ',')} s. Respuesta: “${esc(t.text.slice(0, 60))}”` : `❌ ${esc(t.error)}`}</div>` : ''}
+    <button class="link danger" data-action="ai-delkey">Quitar clave</button>` : ''}`;
+}
+
+async function loadAiModels() {
+  const key = aiCfg().key; if (!key) return;
+  S.aiModels = 'loading'; S.aiModelsErr = null; render();
+  try { S.aiModels = await listModels(key); }
+  catch (e) { S.aiModels = []; S.aiModelsErr = e.message; }
+  render();
+}
+
+Object.assign(actions, {
+  'ai-changekey': () => { S.aiEditKey = true; render(); setTimeout(() => $('#ai-key')?.focus(), 50); },
+  'ai-loadmodels': () => loadAiModels(),
+  'ai-test': async () => {
+    const key = aiCfg().key; if (!key) return;
+    const sel = $('#s-aimodel');
+    const model = sel ? sel.value : aiCfg().modelo || 'gemini-flash-latest';
+    if (sel && model !== (aiCfg().modelo || 'gemini-flash-latest')) S.store.saveIn('config', { id: 'ia', modelo: model });
+    document.activeElement?.blur();
+    S.aiTest = 'loading'; render();
+    try { const r = await testConnection(key, model); S.aiTest = { ok: true, model, ...r }; }
+    catch (e) { S.aiTest = { ok: false, error: e.message || String(e) }; }
+    render();
+  },
+});
+document.addEventListener('change', (ev) => {
+  if (ev.target.id !== 's-aimodel') return;
+  run(S.store.saveIn('config', { id: 'ia', modelo: ev.target.value })).then(() => toast('Modelo guardado'));
+  S.aiTest = null;
 });
