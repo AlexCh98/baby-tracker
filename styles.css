@@ -373,4 +373,4 @@ label.btn { cursor: pointer; }
 /* Evitar desbordes horizontales en rejillas con campos */
 .grid2 > *, .grid3 > * { min-width: 0; }
 input.input[type="time"], input.input[type="date"], input.input[type="datetime-local"] { min-width: 0; max-width: 100%; }
-html, body { overflow-x: hidden; }
+main { overflow-x: clip; }
