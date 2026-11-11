@@ -1,6 +1,7 @@
 import { createStore } from './store.js';
 import { WHO } from './who.js';
-import { PERSONAS, planSlots, planStatus, describePlan, planIcs, parseHoras } from './meds.js';
+import { PERSONAS, planSlots, planStatus, describePlan, planIcs, parseHoras, COMIDAS, HORAS_COMIDAS, horasDeComidas, comidaDe } from './meds.js';
+import { askGemini } from './ai.js';
 import { createVoice, voiceSupported, parseCommand, findNumber, norm } from './voice.js';
 
 // ---------------------------------------------------------------- utilidades
@@ -130,7 +131,7 @@ const evTitle = (e) => (e.tipo === 'pecho' && e.lado ? `Pecho · terminó ${LADO
 
 // ---------------------------------------------------------------- estado
 const S = {
-  store: null, user: undefined, baby: null, active: {}, events: [], measures: [], plans: [], agenda: [], temas: [], notas: [], agendaSeg: 'proximo', saludTab: 'medicinas', temaOpen: {},
+  store: null, user: undefined, baby: null, active: {}, events: [], measures: [], plans: [], agenda: [], temas: [], notas: [], agendaSeg: 'proximo', config: {}, chat: null, aiBusy: false, saludTab: 'medicinas', temaOpen: {},
   tab: 'inicio', filtro: 'todo', rango: 'hoy', medida: 'peso',
   sync: { pending: false, online: true }, error: null, loaded: false, lastAdded: null,
   voice: { enabled: false, state: 'apagado' },
@@ -186,6 +187,7 @@ function subscribe() {
   unsubs.push(S.store.watchCol('agenda', (x) => { S.agenda = x; render(); checkAgendaAlerts(); }, err));
   unsubs.push(S.store.watchCol('temas', (x) => { S.temas = x; S.temasLoaded = true; render(); }, err));
   unsubs.push(S.store.watchCol('notas', (x) => { S.notas = x; render(); }, err));
+  unsubs.push(S.store.watchCol('config', (x) => { S.config = Object.fromEntries(x.map((d) => [d.id, d])); render(); }, err));
 }
 
 // Acceso: solo las cuentas permitidas por las reglas de Firestore pueden ver la app.
@@ -224,7 +226,7 @@ function render() {
   dirty = false;
   charts.forEach((c) => c.destroy());
   charts = [];
-  const views = { inicio: viewHome, historial: viewHistory, resumen: viewSummary, crecimiento: () => saludSeg() + viewGrowth(), medicinas: () => saludSeg() + viewMeds(), agenda: viewAgenda, ajustes: viewSettings };
+  const views = { inicio: viewHome, historial: viewHistory, resumen: viewSummary, crecimiento: () => saludSeg() + viewGrowth(), medicinas: () => saludSeg() + viewMeds(), agenda: viewAgenda, asistente: viewAI, ajustes: viewSettings };
   const scroll = window.scrollY;
   app.innerHTML = `
     ${header()}
@@ -246,7 +248,8 @@ function header() {
   return `<header class="top">
     <div class="avatar">${S.baby?.sexo === 'nino' ? '👶🏻' : S.baby?.sexo === 'nina' ? '👶🏻' : '👶🏻'}</div>
     <div class="grow"><h1>${esc(nombre)}</h1><div class="age">${esc(babyAge(S.baby?.nacimiento)) || 'Configura los datos en Ajustes'}</div></div>
-    ${voiceSupported ? `<button class="mic ${S.voice.enabled ? 'on' : ''}" data-action="voice-toggle" title="Escucha por palabra clave">🎙️</button>` : ''}
+    <button class="mic ai-btn ${S.tab === 'asistente' ? 'on' : ''}" data-action="tab" data-tab="asistente" title="Asistente IA">✨</button>
+    ${voiceSupported ? `<button class="mic vmic ${S.voice.enabled ? 'on' : ''}" data-action="voice-toggle" title="Escucha por palabra clave">🎙️</button>` : ''}
     <button class="mic" style="filter:none;opacity:${S.tab === 'ajustes' ? 1 : .75}" data-action="tab" data-tab="ajustes" title="Ajustes">⚙️</button>
     <span class="${syncClass()}" title="Sincronización"></span>
   </header>`;
@@ -266,7 +269,7 @@ function evRow(e) {
   const who = e.autor && e.autor !== me() ? `<div class="who" title="${esc(e.autor)}">${esc(e.autor[0])}</div>` : '';
   return `<button class="ev" data-action="edit" data-id="${esc(e.id)}" style="--c:${t.c}">
     <span class="ic">${t.icon}</span>
-    <span class="tx"><div class="t1">${esc(evTitle(e))}</div><div class="t2">${esc(describe(e))}</div></span>
+    <span class="tx"><div class="t1">${esc(evTitle(e))}${e.foto ? ' <span title="Con foto">📷</span>' : ''}</div><div class="t2">${esc(describe(e))}</div></span>
     <span class="tm">${fmtTime(e.t)}${who}</span>
   </button>`;
 }
@@ -415,7 +418,8 @@ function stats(from, to) {
 
 // ---------------------------------------------------------------- Historial
 function viewHistory() {
-  const filtros = [['todo', 'Todo'], ['tomas', '🤱 Tomas'], ['panales', '🧷 Pañales'], ['sueno', '🌙 Sueño'], ['salud', '💊 Salud'], ['otros', '📝 Otros']];
+  const filtros = [['fotos', '📷 Fotos'], ['todo', 'Todo'], ['tomas', '🤱 Tomas'], ['panales', '🧷 Pañales'], ['sueno', '🌙 Sueño'], ['salud', '💊 Salud'], ['otros', '📝 Otros']];
+  if (S.filtro === 'fotos') return viewFotosHeader(filtros) + viewFotos();
   const list = S.events.filter((e) => S.filtro === 'todo' || T[e.tipo]?.g === S.filtro);
   let h = `<div class="chips-scroll">${filtros.map(([k, l]) => `<button class="chip ${S.filtro === k ? 'on' : ''}" data-action="filtro" data-f="${k}">${l}</button>`).join('')}</div>`;
   if (!list.length) return h + `<div class="card empty">No hay registros${S.filtro !== 'todo' ? ' de este tipo' : ''} en los últimos 45 días.</div>`;
@@ -570,6 +574,8 @@ function viewSettings() {
     <div class="field"><label>Máximo de horas entre tomas (desde el inicio de una al de la siguiente)</label><input class="input" id="s-maxh" inputmode="decimal" value="${String(b.maxEntreTomas ?? 3).replace('.', ',')}">
       <div class="faint" style="font-size:12px;margin-top:6px">La AEP recomienda que el recién nacido no pase más de 3 h sin comer, también de noche. Ajústalo si el pediatra os indica otra cosa.</div></div>
     <div class="field"><label>Avisar si se pasa ese tiempo sin comer</label>${pickPlain2('s-avisotoma', b.avisoTomas ? '1' : '0', [['1', 'Sí'], ['0', 'No']])}</div>
+    <div class="field"><label>Horario de comidas (para medicamentos “con las comidas”)</label>
+      <div class="grid3">${Object.entries(COMIDAS).map(([k, l]) => `<div><div class="faint" style="font-size:12px;margin-bottom:4px">${l}</div><input class="input" type="time" id="s-hc-${k}" value="${horaComida(k)}" style="padding:10px 8px"></div>`).join('')}</div></div>
     <div class="field"><label>Medicación diaria a recordar (vacío para ocultar)</label><input class="input" id="s-med" value="${esc(b.medDiaria ?? 'Vitamina D')}"></div>
     <button class="btn primary block" data-action="save-baby">Guardar</button>
   </div>
@@ -583,6 +589,15 @@ function viewSettings() {
     <div class="grid2"><button class="btn" data-action="voice-help">Ver órdenes</button><button class="btn primary" data-action="save-voice">Guardar</button></div>
     <p class="muted" style="font-size:13px;margin:12px 0 0">Con 🎙️ arriba activas la escucha: dices la palabra clave y luego la orden. Solo funciona con la app abierta (la pantalla se queda encendida). En iPhone, la voz funciona en Safari, no desde el icono de inicio.</p>`
     : '<div class="muted" style="font-size:14px">Este navegador no admite reconocimiento de voz. Usa Chrome en Android o Safari en iPhone.</div>'}
+  </div>
+
+  <div class="section-title">Asistente IA</div>
+  <div class="card">
+    ${aiCfg().key ? `<div class="kv"><span class="muted">Clave de Gemini</span><span>••••${esc(aiCfg().key.slice(-4))}</span></div>
+      <div class="field" style="margin-top:12px"><label>Modelo</label><input class="input" id="s-aimodel" value="${esc(aiCfg().modelo || 'gemini-flash-latest')}">
+        <div class="faint" style="font-size:12px;margin-top:6px">Si el modelo deja de existir, la app elige sola el Flash más reciente.</div></div>
+      <div class="grid2"><button class="btn danger" data-action="ai-delkey">Quitar clave</button><button class="btn primary" data-action="ai-savemodel">Guardar</button></div>`
+      : '<button class="btn primary block" data-action="tab" data-tab="asistente">Configurar el asistente</button>'}
   </div>
 
   <div class="section-title">Datos</div>
@@ -814,6 +829,7 @@ function openEventForm(tipo, ev) {
         <div class="field" id="color-f"><label>Color de la caca (opcional)</label><input type="hidden" name="color" value="${esc(e.color || '')}">
           <div class="chip-row">${COLORES.map(([v, l, c]) => `<button type="button" class="chip ${e.color === v ? 'on' : ''}" data-pick="color" data-v="${v}"><span class="swatch" style="background:${c}"></span>${l}</button>`).join('')}</div>
           <div class="hint hidden" id="color-hint">Caca blanca, gris o con sangre: coméntalo con el pediatra.</div></div>
+        ${fotoField()}
         ${timeField(e.t || now)}${notaField(e.nota)}`;
       read = (f) => { const k = f.kind.value; const caca = k === 'caca' || k === 'ambos'; return { pis: k === 'pis' || k === 'ambos', caca, color: caca ? f.color.value : '', t: fromLocalInput(f.t.value), nota: f.nota.value.trim() }; };
       break;
@@ -859,6 +875,7 @@ function openEventForm(tipo, ev) {
       break;
   }
 
+  const foto = { data: null, changed: false };
   const form = openSheet(ev ? `Editar · ${t.label}` : t.label, body, {
     icon: `<span class="qbtn" style="--c:${t.c};all:unset"><span style="display:grid;place-items:center;width:36px;height:36px;border-radius:12px;background:color-mix(in srgb, ${t.c} 20%, transparent)">${t.icon}</span></span>`,
     onSave: (f) => {
@@ -866,11 +883,20 @@ function openEventForm(tipo, ev) {
       if (data === false) return false;
       if (!data.t || isNaN(data.t)) { toast('Revisa la fecha y hora', true); return false; }
       vibrate();
-      if (ev) run(S.store.updateEvent(ev.id, data)).then(() => toast('Guardado'));
-      else { addEv(({ tipo, autor: me(), ...data })); toast(`${t.label} registrado`); }
+      if (foto.changed) data.foto = !!foto.data;
+      const saveFoto = (id) => {
+        if (!foto.changed || !id) return;
+        S.fotos = null;
+        if (foto.data) run(S.store.saveIn('fotos', { id, data: foto.data, t: data.t, tipo, color: data.color || '', desc: describe({ tipo, ...data }) }));
+        else run(S.store.deleteIn('fotos', id));
+      };
+      if (ev) { run(S.store.updateEvent(ev.id, data)).then(() => toast('Guardado')); saveFoto(ev.id); }
+      else { addEv(({ tipo, autor: me(), ...data })).then((r) => saveFoto(r && r.id)); toast(`${t.label} registrado`); }
     },
-    onDelete: ev ? () => { run(S.store.deleteEvent(ev.id)); toast('Eliminado'); } : null,
+    onDelete: ev ? () => { run(S.store.deleteEvent(ev.id)); if (ev.foto) run(S.store.deleteIn('fotos', ev.id)); toast('Eliminado'); } : null,
   });
+
+  if (tipo === 'panal') bindFoto(form, foto, ev);
 
   // Comportamiento dinámico
   const update = () => {
@@ -973,6 +999,13 @@ const actions = {
     if (!isNaN(nac)) data.nacimiento = nac;
     const sexo = S._sexo || S.baby?.sexo;
     if (sexo) data.sexo = sexo;
+    const hc = {};
+    for (const k of Object.keys(COMIDAS)) { const v = $(`#s-hc-${k}`)?.value; if (v) hc[k] = v; }
+    data.horasComidas = { ...HORAS_COMIDAS, ...hc };
+    for (const pl of S.plans.filter((x) => x.modo === 'comidas')) {
+      const horas = horasDeComidas(pl.comidas, data.horasComidas);
+      if (horas.join() !== (pl.horas || []).join()) S.store.savePlan({ ...pl, horas });
+    }
     document.activeElement?.blur();
     run(S.store.saveBaby(data)).then(() => toast('Guardado'));
     S._sexo = null;
@@ -1231,8 +1264,8 @@ const voice = voiceSupported ? createVoice({
   onIntent: (it, v) => { if (!S.user || S.access !== 'ok') return v.speak('Primero inicia sesión'); handleIntent(it, v); },
   onState: (st) => {
     S.voice = st;
-    const m = $('.mic');
-    if (m) m.className = 'mic' + (st.enabled ? ' on' : '') + (st.state === 'escuchando' ? ' hot' : '');
+    const m = $('.vmic');
+    if (m) m.className = 'mic vmic' + (st.enabled ? ' on' : '') + (st.state === 'escuchando' ? ' hot' : '');
     clearTimeout(ovTimer);
     if (st.state === 'escuchando' || st.state === 'procesando') {
       voiceOv.innerHTML = `<span class="pulse" style="--c:var(--accent)"></span><b>${st.state === 'escuchando' ? 'Te escucho…' : 'Entendido'}</b>${st.texto ? `<div class="vt">“${esc(st.texto)}”</div>` : ''}`;
@@ -1329,8 +1362,8 @@ function openPlanForm(pl) {
     <div class="field"><label>Medicamento</label><input class="input" name="nombre" list="meds-list" value="${esc(e.nombre || '')}" placeholder="p. ej. Paracetamol">
       <datalist id="meds-list">${['Paracetamol', 'Ibuprofeno', 'Hierro', 'Enoxaparina (Clexane)', 'Omeprazol', 'Vitamina D', 'Antibiótico', 'Metamizol (Nolotil)'].map((x) => `<option>${x}</option>`).join('')}</datalist></div>
     <div class="field"><label>Dosis (opcional)</label><input class="input" name="dosis" value="${esc(e.dosis || '')}" placeholder="p. ej. 1 g, 1 comprimido, 2 gotas"></div>
-    <div class="field"><label>Frecuencia</label>${pick('modo', modo, [['intervalo', 'Cada X horas'], ['horas', 'A horas fijas']])}</div>
-    <div id="f-intervalo" class="${modo === 'horas' ? 'hidden' : ''}">
+    <div class="field"><label>Frecuencia</label>${pick('modo', modo, [['intervalo', 'Cada X h'], ['horas', 'Horas fijas'], ['comidas', 'Comidas']])}</div>
+    <div id="f-intervalo" class="${modo !== 'intervalo' ? 'hidden' : ''}">
       <div class="field"><label>Cada cuántas horas</label><input class="input" name="cadaH" inputmode="decimal" value="${e.cadaH ?? 8}">
         <div class="chip-row" style="margin-top:8px">${[4, 6, 8, 12, 24].map((v) => `<button type="button" class="chip" data-fill="cadaH" data-v="${v}">${v} h</button>`).join('')}</div></div>
       ${timeField(e.inicio || r.getTime(), 'Primera toma', 'inicio', false)}
@@ -1340,6 +1373,12 @@ function openPlanForm(pl) {
     <div id="f-horas" class="${modo === 'horas' ? '' : 'hidden'}">
       <div class="field"><label>Horas (separadas por comas)</label><input class="input" name="horas" value="${esc((e.horas || ['09:00', '21:00']).join(', '))}" placeholder="9:00, 21:00"></div>
       <div class="field"><label>Empieza</label><input class="input" type="date" name="desde" value="${toLocalInput(e.inicio || now).slice(0, 10)}"></div>
+    </div>
+    <div id="f-comidas" class="${modo === 'comidas' ? '' : 'hidden'}">
+      <div class="field"><label>¿Con qué comidas?</label><input type="hidden" name="comidas" value="${esc((e.comidas || ['desayuno', 'comida', 'cena']).join(','))}">
+        <div class="grid3">${Object.entries(COMIDAS).map(([k, l]) => `<button type="button" class="opt ${(e.comidas || ['desayuno', 'comida', 'cena']).includes(k) ? 'on' : ''}" data-comida="${k}"><span class="i">${{ desayuno: '☕', comida: '🍽️', cena: '🌙' }[k]}</span>${l}<div class="faint" style="font-size:12px;font-weight:400">${horaComida(k)}</div></button>`).join('')}</div>
+        <div class="faint" style="font-size:12px;margin-top:6px">Las horas de cada comida se cambian en ⚙️ Ajustes.</div></div>
+      <div class="field"><label>Empieza</label><input class="input" type="date" name="desdeC" value="${toLocalInput(e.inicio || now).slice(0, 10)}"></div>
     </div>
     <div class="field"><label>Duración en días (vacío = sin fin)</label><input class="input" name="dias" inputmode="numeric" value="${e.dias ?? ''}" placeholder="Sin fin">
       <div class="chip-row" style="margin-top:8px">${[3, 5, 7, 10, 14, 30].map((v) => `<button type="button" class="chip" data-fill="dias" data-v="${v}">${v} días</button>`).join('')}</div></div>
@@ -1355,7 +1394,14 @@ function openPlanForm(pl) {
       if (!nombre) return toast('Indica el medicamento', true), false;
       const plan = { persona: f.persona.value, nombre, dosis: f.dosis.value.trim(), modo: f.modo.value, notas: f.notas.value.trim(),
         dias: num(f.dias.value) || null, activo: pl ? f.activo.value === '1' : true, actualizado: Date.now(), autor: me() };
-      if (plan.modo === 'horas') {
+      if (plan.modo === 'comidas') {
+        plan.comidas = f.comidas.value.split(',').filter(Boolean);
+        if (!plan.comidas.length) return toast('Elige al menos una comida', true), false;
+        plan.horas = horasDeComidas(plan.comidas, S.baby?.horasComidas);
+        const d = f.desdeC.value ? new Date(f.desdeC.value + 'T00:00') : new Date();
+        d.setHours(0, 0, 0, 0); plan.inicio = d.getTime();
+        plan.cadaH = null; plan.desdeToma = false;
+      } else if (plan.modo === 'horas') {
         plan.horas = parseHoras(f.horas.value);
         if (!plan.horas.length) return toast('Escribe al menos una hora, p. ej. 9:00', true), false;
         const d = f.desde.value ? new Date(f.desde.value + 'T00:00') : new Date();
@@ -1383,9 +1429,15 @@ function openPlanForm(pl) {
     onDelete: pl ? () => { run(S.store.deletePlan(pl.id)); toast('Medicamento eliminado'); } : null,
   });
   form.addEventListener('change', () => {
-    const h = form.modo.value === 'horas';
-    $('#f-intervalo', form).classList.toggle('hidden', h);
-    $('#f-horas', form).classList.toggle('hidden', !h);
+    const m = form.modo.value;
+    $('#f-intervalo', form).classList.toggle('hidden', m !== 'intervalo');
+    $('#f-horas', form).classList.toggle('hidden', m !== 'horas');
+    $('#f-comidas', form).classList.toggle('hidden', m !== 'comidas');
+  });
+  form.addEventListener('click', (ev) => {
+    const b = ev.target.closest('[data-comida]'); if (!b) return;
+    b.classList.toggle('on');
+    form.comidas.value = [...form.querySelectorAll('[data-comida].on')].map((x) => x.dataset.comida).join(',');
   });
 }
 
@@ -1493,7 +1545,8 @@ function checkMedAlerts() {
   saveJson(ALERT_KEY, alerted.concat(fresh.map((x) => x.key)).slice(-300));
   for (const { pl, st } of fresh) {
     const quien = pl.persona === 'mama' ? 'Mamá' : S.baby?.nombre || 'Bebé';
-    notify(`💊 ${pl.nombre}${pl.dosis ? ' · ' + pl.dosis : ''}`, `${quien}: tocaba a las ${fmtTime(st.proxima)}`, `med-${pl.id}`);
+    const cm = comidaDe(pl, st.proxima);
+    notify(`💊 ${pl.nombre}${pl.dosis ? ' · ' + pl.dosis : ''}`, `${quien}: ${cm ? `con ${cm === 'comida' ? 'la comida' : cm === 'cena' ? 'la cena' : 'el desayuno'} (${fmtTime(st.proxima)})` : `tocaba a las ${fmtTime(st.proxima)}`}`, `med-${pl.id}`);
   }
   alarmSound();
   showMedAlert();
@@ -1510,7 +1563,7 @@ function showMedAlert() {
     return `<div class="card">
       <span class="who-tag ${pl.persona}">${esc(quien)}</span>
       <div style="font-size:19px;font-weight:700;margin-top:6px">${esc(pl.nombre)}${pl.dosis ? ` <span class="muted" style="font-weight:400">· ${esc(pl.dosis)}</span>` : ''}</div>
-      <div class="muted" style="margin-top:2px">Tocaba a las ${fmtTime(st.proxima)} (${enTiempo(st.proxima)})</div>
+      <div class="muted" style="margin-top:2px">${comidaDe(pl, st.proxima) ? `Con ${{ desayuno: 'el desayuno', comida: 'la comida', cena: 'la cena' }[comidaDe(pl, st.proxima)]} · ` : ''}Tocaba a las ${fmtTime(st.proxima)} (${enTiempo(st.proxima)})</div>
       ${pl.notas ? `<div class="hint" style="margin-top:10px">${esc(pl.notas)}</div>` : ''}
       <button type="button" class="btn c block" style="--c:var(--ok);margin-top:12px;padding:15px;font-size:17px" data-action="med-take" data-id="${esc(pl.id)}">✓ Tomada</button>
       <div class="grid2" style="margin-top:8px"><button type="button" class="btn" data-action="med-snooze" data-key="${esc(key)}">⏰ +15 min</button><button type="button" class="btn" data-action="med-skip" data-id="${esc(pl.id)}">Saltar</button></div>
@@ -1950,3 +2003,327 @@ function checkAgendaAlerts() {
       : `<button type="button" class="btn primary block" data-action="close-sheet">Entendido</button>`}`, { icon: '<span style="font-size:24px">⏰</span>' });
   const r = $('#sheet-root'); if (r) r.dataset.kind = 'ag-alert';
 }
+
+function horaComida(k) { return (S.baby?.horasComidas || {})[k] || HORAS_COMIDAS[k]; }
+
+// ---------------------------------------------------------------- fotos de pañales
+function fotoField() {
+  return `<div class="field"><label>Foto (opcional)</label>
+    <div class="foto-box">
+      <img id="foto-prev" class="hidden" alt="Foto del pañal">
+      <div class="foto-ph" id="foto-ph">Sin foto</div>
+    </div>
+    <div class="grid3" style="margin-top:8px">
+      <label class="btn" style="text-align:center">📷 Cámara<input type="file" accept="image/*" capture="environment" id="foto-cam" hidden></label>
+      <label class="btn" style="text-align:center">🖼️ Galería<input type="file" accept="image/*" id="foto-gal" hidden></label>
+      <button type="button" class="btn danger" id="foto-del" disabled>Quitar</button>
+    </div>
+    <div class="faint" style="font-size:12px;margin-top:6px">Se guarda reducida y solo la veis vosotros dos.</div></div>`;
+}
+
+function bindFoto(form, foto, ev) {
+  const prev = $('#foto-prev', form), ph = $('#foto-ph', form), del = $('#foto-del', form);
+  const show = (data) => {
+    prev.classList.toggle('hidden', !data); ph.classList.toggle('hidden', !!data);
+    if (data) prev.src = data; else prev.removeAttribute('src');
+    del.disabled = !data;
+  };
+  if (ev && ev.foto) {
+    ph.textContent = 'Cargando foto…';
+    S.store.getIn('fotos', ev.id).then((f) => { if (f && !foto.changed) { foto.data = f.data; show(f.data); } else if (!foto.changed) ph.textContent = 'Sin foto'; })
+      .catch(() => { ph.textContent = 'No se pudo cargar la foto'; });
+  }
+  const onFile = async (input) => {
+    const file = input.files && input.files[0];
+    input.value = '';
+    if (!file) return;
+    ph.textContent = 'Procesando…';
+    try {
+      foto.data = await compressImage(file, 900, 0.72);
+      foto.changed = true; show(foto.data);
+    } catch (e) { toast('No se pudo leer la foto', true); ph.textContent = 'Sin foto'; }
+  };
+  $('#foto-cam', form).addEventListener('change', (e) => onFile(e.target));
+  $('#foto-gal', form).addEventListener('change', (e) => onFile(e.target));
+  del.addEventListener('click', () => { foto.data = null; foto.changed = true; show(null); ph.textContent = 'Sin foto'; });
+  prev.addEventListener('click', () => openFotoViewer(foto.data, ''));
+}
+
+// Reduce la foto (lado mayor maxSide px, JPEG) para guardarla en la base de datos.
+async function compressImage(file, maxSide, quality) {
+  let src;
+  try { src = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+  catch {
+    src = await new Promise((res, rej) => { const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = URL.createObjectURL(file); });
+  }
+  const w0 = src.width, h0 = src.height;
+  const k = Math.min(1, maxSide / Math.max(w0, h0));
+  const c = document.createElement('canvas');
+  c.width = Math.round(w0 * k); c.height = Math.round(h0 * k);
+  c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+  let q = quality, out = c.toDataURL('image/jpeg', q);
+  while (out.length > 700000 && q > 0.35) { q -= 0.1; out = c.toDataURL('image/jpeg', q); }
+  return out;
+}
+
+function openFotoViewer(data, caption) {
+  if (!data) return;
+  const d = document.createElement('div');
+  d.className = 'viewer';
+  d.innerHTML = `<img src="${data}" alt=""><div class="cap">${esc(caption || '')}</div><button class="viewer-x" aria-label="Cerrar">✕</button>`;
+  d.addEventListener('click', () => d.remove());
+  document.body.appendChild(d);
+}
+
+function viewFotosHeader(filtros) {
+  return `<div class="chips-scroll">${filtros.map(([k, l]) => `<button class="chip ${S.filtro === k ? 'on' : ''}" data-action="filtro" data-f="${k}">${l}</button>`).join('')}</div>`;
+}
+function viewFotos() {
+  if (!S.fotos) {
+    S.fotos = 'loading';
+    S.store.listIn('fotos', 60).then((f) => { S.fotos = f; render(); }).catch((e) => { S.fotos = []; toast('No se pudieron cargar las fotos: ' + e.message, true); render(); });
+  }
+  if (S.fotos === 'loading') return '<div class="card empty">Cargando fotos…</div>';
+  if (!S.fotos.length) return '<div class="card empty">Aún no hay fotos.<br>Al registrar un pañal puedes añadir una foto para ir viendo la evolución.</div>';
+  let h = '<p class="muted" style="margin:0 4px 12px;font-size:13px">Evolución de las cacas, de la más reciente a la más antigua. Toca una para verla grande.</p><div class="fotos">';
+  for (const f of S.fotos) {
+    const c = COLORES.find((x) => x[0] === f.color);
+    h += `<button class="foto" data-action="foto-open" data-id="${esc(f.id)}"><img src="${f.data}" alt="" loading="lazy">
+      <span class="fcap">${c ? `<span class="swatch" style="background:${c[2]}"></span>` : ''}${shortDay(f.t)} ${fmtTime(f.t)}</span></button>`;
+  }
+  return h + '</div><button class="link" data-action="fotos-reload">Actualizar</button>';
+}
+Object.assign(actions, {
+  'foto-open': (b) => { const f = Array.isArray(S.fotos) && S.fotos.find((x) => x.id === b.dataset.id); if (f) openFotoViewer(f.data, `${dayLabel(f.t)} ${fmtTime(f.t)} · ${f.desc || ''}`); },
+  'fotos-reload': () => { S.fotos = null; render(); },
+});
+
+// ---------------------------------------------------------------- asistente IA
+const CHAT_KEY = 'monitor-bebe-chat';
+const aiCfg = () => S.config?.ia || {};
+const fechaLarga = (t) => { const d = new Date(t); return `${DIAS[d.getDay()]} ${d.getDate()} ${MESES[d.getMonth()]} ${d.getFullYear()} ${fmtTime(t)}`; };
+const fecha = (t) => { const d = new Date(t); return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${fmtTime(t)}`; };
+
+function loadChat() { if (!S.chat) S.chat = loadJson(CHAT_KEY, []); return S.chat; }
+function saveChat() { saveJson(CHAT_KEY, (S.chat || []).slice(-30)); }
+
+const AI_SYSTEM = `Eres el asistente de "Monitor Bebé", una app que usan unos padres primerizos (mamá y papá) en España para registrar todo sobre su bebé recién nacido: tomas (pecho por lado y duración, biberón), pañales (pis, caca, color y fotos), regurgitaciones, sueño, peso y medidas con percentiles OMS, medicación del bebé y de la mamá, citas, recordatorios y notas.
+
+Cómo responder:
+- En español de España, cercano y tranquilo, conciso. Usa listas cortas y **negritas** para lo importante. Sin tablas.
+- Básate SOLO en los datos que te paso. Cita cifras concretas (fechas, horas, números). Si faltan datos o hay pocos registros, dilo y no inventes.
+- Compara con las pautas generales para recién nacidos (AEP/OMS): 8–12 tomas al día a demanda; no más de unas 3 h entre tomas (de inicio a inicio) las primeras semanas; pérdida de peso normal hasta ~7-10 % los primeros días y recuperar el peso de nacimiento hacia los 10–14 días; después ganancia aproximada de 150–250 g/semana; desde el día 5 aprox. al menos 6 pañales mojados al día y 3–4 cacas o más; cacas: meconio negro los primeros días, transición verdosa, y amarilla/mostaza "grumosa" hacia el día 4-5 en lactancia materna.
+- Si ves señales de alarma, dilo claramente al principio y recomienda llamar al pediatra o ir a urgencias: fiebre ≥ 38 ºC en menores de 3 meses; caca blanca, gris o con sangre; muy pocos pañales mojados; rechazo de tomas o mucho adormilamiento; vómitos en proyectil repetidos o verdes; color amarillo de piel que aumenta; pérdida de peso > 10 %. Para la mamá: fiebre > 38 ºC, sangrado abundante o dolor intenso.
+- No eres médico: no diagnostiques ni cambies dosis de medicación; puedes explicar lo general y sugerir qué preguntar al pediatra o matrona.
+- Sobre las fotos de pañales: describe color y consistencia que se ve, la evolución en el tiempo y si encaja con lo esperado para la edad. Avisa si algo debe consultarse.
+- Puedes proponer acciones útiles (máximo 3): notas para preguntar al pediatra/matrona, compras o recordatorios. Si propones alguna, añádelas AL FINAL en un bloque exactamente así:
+\`\`\`acciones
+[{"tipo":"nota","tema":"pediatra","texto":"..."},{"tipo":"recordatorio","titulo":"...","cuando":"2026-11-12T10:00"}]
+\`\`\`
+  tema puede ser: pediatra, matrona, compras, otros. "cuando" en hora local de España. No pongas el bloque si no hay nada útil que proponer.`;
+
+function contextoDatos() {
+  const now = Date.now();
+  const b = S.baby || {};
+  const L = [];
+  L.push(`FECHA Y HORA ACTUAL: ${fechaLarga(now)}`);
+  if (b.nacimiento) {
+    const dias = Math.floor((now - b.nacimiento) / DAY);
+    L.push(`BEBÉ: ${b.nombre || 'sin nombre'}, ${b.sexo === 'nino' ? 'niño' : b.sexo === 'nina' ? 'niña' : 'sexo no indicado'}. Nació el ${fechaLarga(b.nacimiento)}. Edad: ${dias} días${dias >= 14 ? ` (${babyAge(b.nacimiento)})` : ""}.`);
+  } else L.push(`BEBÉ: ${b.nombre || 'sin nombre'} (fecha de nacimiento no indicada)`);
+  L.push(`Máximo de horas entre tomas configurado: ${b.maxEntreTomas || 3} h.`);
+
+  // Medidas
+  const ms = S.measures;
+  if (ms.length) {
+    const first = ms.find((m) => m.pesoG);
+    L.push('\nPESO Y MEDIDAS:');
+    for (const m of ms) {
+      const p = [];
+      if (m.pesoG) {
+        let pc = '';
+        if (b.nacimiento && b.sexo) {
+          const days = (m.t - b.nacimiento) / DAY;
+          if (days >= 0) pc = ` (P${Math.round(normCdf(lmsZ(lmsAt(WHO[`peso_${b.sexo}`], days), m.pesoG / 1000)) * 100)})`;
+        }
+        const rel = first && first !== m ? `, ${((m.pesoG - first.pesoG) / first.pesoG * 100).toFixed(1)} % vs primer peso` : '';
+        p.push(`peso ${m.pesoG} g${pc}${rel}`);
+      }
+      if (m.talla) p.push(`longitud ${m.talla} cm`);
+      if (m.cabeza) p.push(`perímetro cefálico ${m.cabeza} cm`);
+      L.push(`- ${fecha(m.t)}: ${p.join(', ')}${m.nota ? ` (${m.nota})` : ''}`);
+    }
+  } else L.push('\nPESO Y MEDIDAS: sin registros.');
+
+  // Resumen diario 14 días
+  L.push('\nRESUMEN POR DÍA (día natural, últimos 14 días; hoy está incompleto):');
+  const d0 = dayStart(now);
+  for (let i = 13; i >= 0; i--) {
+    const ds = d0 - i * DAY, de = Math.min(ds + DAY, now);
+    const st = stats(ds, de), fs = feedStats(ds, de);
+    const ev = S.events.filter((e) => e.t >= ds && e.t < de);
+    if (!ev.length && !st.sueno) continue;
+    const colores = ev.filter((e) => e.tipo === 'panal' && e.caca && e.color).map((e) => e.color);
+    const ccount = {}; colores.forEach((c) => (ccount[c] = (ccount[c] || 0) + 1));
+    L.push(`- ${DIAS[new Date(ds).getDay()].slice(0, 3)} ${fecha(ds).slice(0, 5)}: tomas ${st.tomas} (pecho ${fs.pechoN}, biberones ${st.biberones}${st.ml ? ` = ${st.ml} ml` : ''}); pecho total ${Math.round(st.pechoMs / MIN)} min (izq ${Math.round(st.izq / MIN)}, der ${Math.round(st.der / MIN)}); intervalo medio ${fs.intervalo ? fmtDur(fs.intervalo) : '—'}, máx ${fs.maxI ? fmtDur(fs.maxI) : '—'}; pañales ${st.panales}: pis ${st.pis}, cacas ${st.caca}${Object.keys(ccount).length ? ` (colores: ${Object.entries(ccount).map(([c, n]) => `${c} ${n}`).join(', ')})` : ''}; regurgitaciones ${st.regurg}; sueño ${(st.sueno / HOUR).toFixed(1)} h${st.extraccionMl ? `; extracción ${st.extraccionMl} ml` : ''}`);
+  }
+
+  // Detalle 48 h
+  L.push('\nREGISTROS DETALLADOS ÚLTIMAS 48 H (más antiguos primero):');
+  const det = S.events.filter((e) => e.t >= now - 2 * DAY).sort((a, c) => a.t - c.t);
+  if (!det.length) L.push('- (ninguno)');
+  for (const e of det) L.push(`- ${fecha(e.t)} ${evTitle(e)}: ${describe(e)}${e.foto ? ' [con foto]' : ''}`);
+  if (S.active.pecho) L.push(`EN CURSO: toma de pecho desde ${fmtTime(S.active.pecho.inicio)}, ahora en el ${LADO[S.active.pecho.lado]}.`);
+  if (S.active.sueno) L.push(`EN CURSO: durmiendo desde ${fmtTime(S.active.sueno.inicio)}.`);
+
+  // Medicación
+  if (S.plans.length) {
+    L.push('\nMEDICACIÓN (pautas):');
+    for (const pl of S.plans) {
+      const st = statusOf(pl, now);
+      const logs = medLogs(pl).filter((e) => e.t >= now - 3 * DAY);
+      L.push(`- ${pl.persona === 'mama' ? 'MAMÁ' : 'BEBÉ'}: ${pl.nombre}${pl.dosis ? ' ' + pl.dosis : ''} — ${describePlan(pl)}; estado: ${st.estado}${st.proxima ? ` (${st.estado === 'toca' ? 'tocaba' : 'próxima'} ${fecha(st.proxima)})` : ''}; últimos 3 días: ${logs.filter((x) => x.estado !== 'saltada').length} tomadas, ${logs.filter((x) => x.estado === 'saltada').length} saltadas${pl.notas ? `; nota: ${pl.notas}` : ''}`);
+    }
+  }
+  // Agenda y notas
+  const up = agendaUpcoming(now).slice(0, 8);
+  if (up.length) {
+    L.push('\nAGENDA PRÓXIMA:');
+    for (const a of up) L.push(`- ${fecha(a.cuando)} ${a.tipo === 'cita' ? 'CITA' : 'RECORDATORIO'}: ${a.titulo}${a.lugar ? ' en ' + a.lugar : ''}`);
+  }
+  const temas = temasOrdenados().map((t) => ({ t, p: pendientes(t.id) })).filter((x) => x.p.length);
+  if (temas.length) {
+    L.push('\nNOTAS PENDIENTES:');
+    for (const { t, p } of temas) L.push(`- ${t.nombre}: ${p.map((n) => n.texto).join(' | ')}`);
+  }
+  return L.join('\n');
+}
+
+const QUICK = [
+  ['¿Cómo vamos? Hazme un resumen de las últimas 24 horas y dime si todo encaja con lo esperado para su edad.', '📋 ¿Cómo vamos?'],
+  ['Analiza la evolución de esta semana: tomas, peso, pañales y sueño. ¿Qué tendencias ves?', '📈 Evolución semanal'],
+  ['Analiza las fotos de los pañales: color, consistencia y evolución. ¿Es lo esperado para su edad?', '🧷 Analizar pañales'],
+  ['Prepárame la lista de preguntas para la próxima visita al pediatra, a partir de los datos y las notas.', '🩺 Preguntas pediatra'],
+  ['¿Qué me sugieres apuntar o recordar estos días?', '💡 Sugerencias'],
+];
+
+function mdLite(text) {
+  const lines = esc(text).split('\n');
+  let h = '', inList = false;
+  for (let ln of lines) {
+    ln = ln.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/(^|\s)\*(\S.*?)\*(?=\s|$)/g, '$1<i>$2</i>');
+    const li = ln.match(/^\s*(?:[-*•]|\d+[.)])\s+(.*)/);
+    if (li) { if (!inList) { h += '<ul>'; inList = true; } h += `<li>${li[1]}</li>`; continue; }
+    if (inList) { h += '</ul>'; inList = false; }
+    const hd = ln.match(/^#{1,4}\s+(.*)/);
+    if (hd) h += `<h4>${hd[1]}</h4>`;
+    else if (ln.trim()) h += `<p>${ln}</p>`;
+  }
+  if (inList) h += '</ul>';
+  return h;
+}
+
+function splitActions(text) {
+  const m = text.match(/```acciones\s*([\s\S]*?)```/);
+  let acc = [];
+  if (m) { try { acc = JSON.parse(m[1]); } catch {} }
+  return { texto: text.replace(/```acciones[\s\S]*?```/, '').trim(), acciones: Array.isArray(acc) ? acc.slice(0, 3) : [] };
+}
+
+function viewAI() {
+  const cfg = aiCfg();
+  let h = `<div class="ai-head"><h2 style="margin:0;font-size:22px">✨ Asistente</h2>${loadChat().length ? '<button class="link" style="margin:0;padding:4px" data-action="ai-clear">Borrar conversación</button>' : ''}</div>`;
+  if (!cfg.key) {
+    return h + `<div class="card">
+      <p style="margin-top:0">Para analizar los datos y las fotos con IA, pega aquí tu clave de <b>Google Gemini</b>. Se guarda en vuestra base de datos privada: solo vosotros dos podéis verla y usarla.</p>
+      <ol class="steps"><li>Entra en <b>aistudio.google.com/apikey</b> con tu cuenta de Google.</li><li>Pulsa <i>Create API key</i> y cópiala.</li><li>Pégala aquí.</li></ol>
+      <div class="field" style="margin-top:12px"><input class="input" id="ai-key" type="password" placeholder="AIza…" autocomplete="off"></div>
+      <button class="btn primary block" data-action="ai-savekey">Guardar clave</button>
+      <p class="faint" style="font-size:12px;margin-bottom:0">Los datos y fotos que analices se envían a Google. Con la clave gratuita, Google puede usarlos para mejorar sus productos y personas de Google pueden revisarlos. Si activas la facturación en esa clave (nivel de pago, céntimos al mes con este uso), dejan de usarlos.</p>
+    </div>`;
+  }
+  const chat = loadChat();
+  h += `<div class="chips-scroll">${QUICK.map(([q, l], i) => `<button class="chip" data-action="ai-quick" data-i="${i}" ${S.aiBusy ? 'disabled' : ''}>${l}</button>`).join('')}</div>`;
+  if (!chat.length) h += `<div class="card muted" style="font-size:14px">Pregúntame lo que quieras sobre ${esc(S.baby?.nombre || 'el bebé')}: cómo van las tomas, si los pañales son normales para su edad, qué preguntar al pediatra… Veo todos los datos de la app y, si lo pides, las fotos de los pañales.<br><br><span class="faint">No sustituye al pediatra: ante cualquier duda importante, llamadle.</span></div>`;
+  h += '<div class="chat">';
+  chat.forEach((m, i) => {
+    if (m.role === 'user') h += `<div class="msg user">${esc(m.text)}${m.fotos ? `<div class="faint" style="font-size:12px;margin-top:4px">📷 ${pl(m.fotos, "foto adjunta", "fotos adjuntas")}</div>` : ''}</div>`;
+    else if (m.error) h += `<div class="msg err">⚠️ ${esc(m.text)}</div>`;
+    else {
+      const { texto, acciones } = splitActions(m.text);
+      h += `<div class="msg ai">${mdLite(texto)}${acciones.map((a, j) => `<button class="act ${m.hechas?.includes(j) ? 'done' : ''}" data-action="ai-act" data-m="${i}" data-j="${j}" ${m.hechas?.includes(j) ? 'disabled' : ''}>${m.hechas?.includes(j) ? '✓ ' : '＋ '}${a.tipo === 'recordatorio' ? `🔔 ${esc(a.titulo || '')}${a.cuando ? ` · ${esc(String(a.cuando).replace('T', ' '))}` : ''}` : `📝 ${esc(a.texto || '')}`}</button>`).join('')}</div>`;
+    }
+  });
+  if (S.aiBusy) h += `<div class="msg ai"><span class="dots"><i></i><i></i><i></i></span> Analizando…</div>`;
+  h += '</div>';
+  h += `<form id="ai-form" class="ai-form"><textarea class="input" name="q" rows="1" placeholder="Escribe una pregunta…" ${S.aiBusy ? 'disabled' : ''}></textarea>
+    <button class="btn primary" type="submit" ${S.aiBusy ? 'disabled' : ''}>➤</button></form>
+    <label class="ai-photos"><input type="checkbox" id="ai-fotos"> Incluir fotos de los últimos pañales</label>`;
+  return h;
+}
+
+async function sendAI(q, conFotos) {
+  const cfg = aiCfg();
+  if (!cfg.key || S.aiBusy || !q.trim()) return;
+  const chat = loadChat();
+  const quiereFotos = conFotos || /foto|pa[ñn]al|caca|heces|deposici/i.test(q);
+  let fotos = [];
+  if (quiereFotos) { try { fotos = (await S.store.listIn('fotos', 6)).reverse(); } catch {} }
+  chat.push({ role: 'user', text: q, fotos: fotos.length || undefined, t: Date.now() });
+  S.aiBusy = true; saveChat(); document.activeElement?.blur(); render(); scrollChat();
+  const history = chat.slice(-11, -1).filter((m) => !m.error).map((m) => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.text }] }));
+  const parts = [{ text: `DATOS ACTUALES DE LA APP:\n${contextoDatos()}\n\n${fotos.length ? `Adjunto ${fotos.length} fotos de pañales (de la más antigua a la más reciente).` : quiereFotos ? 'No hay fotos de pañales guardadas.' : ''}\n\nPREGUNTA: ${q}` }];
+  for (const f of fotos) {
+    parts.push({ text: `Foto del pañal del ${fecha(f.t)}${f.desc ? ` (registrado como: ${f.desc})` : ''}:` });
+    parts.push({ inline_data: { mime_type: 'image/jpeg', data: f.data.split(',')[1] } });
+  }
+  try {
+    const text = await askGemini({ key: cfg.key, model: cfg.modelo || 'gemini-flash-latest', system: AI_SYSTEM, history, parts,
+      onModel: (m) => S.store.saveIn('config', { id: 'ia', modelo: m }) });
+    chat.push({ role: 'model', text, t: Date.now() });
+  } catch (e) {
+    chat.push({ role: 'model', error: true, text: e.message || String(e), t: Date.now() });
+  }
+  S.aiBusy = false; saveChat(); render(); scrollChat();
+}
+function scrollChat() { if (S.tab === 'asistente') setTimeout(() => { const c = document.querySelector('.chat'); if (c && c.lastElementChild) c.lastElementChild.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 60); }
+
+document.addEventListener('submit', (ev) => {
+  if (ev.target.id !== 'ai-form') return;
+  ev.preventDefault();
+  const q = ev.target.q.value;
+  const f = $('#ai-fotos')?.checked;
+  ev.target.q.value = '';
+  sendAI(q, f);
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.target.name === 'q' && ev.target.closest('#ai-form') && ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); ev.target.form.requestSubmit(); }
+});
+
+Object.assign(actions, {
+  'ai-quick': (b) => { const [q] = QUICK[+b.dataset.i]; sendAI(q, /pañales/.test(q)); },
+  'ai-clear': () => { if (confirm('¿Borrar la conversación de este móvil?')) { S.chat = []; saveChat(); render(); } },
+  'ai-savekey': () => {
+    const key = $('#ai-key').value.trim();
+    if (!/^AIza[\w-]{20,}$/.test(key)) return toast('Esa clave no parece válida (empieza por AIza…)', true);
+    document.activeElement?.blur();
+    run(S.store.saveIn('config', { id: 'ia', key, modelo: aiCfg().modelo || 'gemini-flash-latest' })).then(() => toast('Clave guardada'));
+  },
+  'ai-delkey': () => { if (confirm('¿Quitar la clave de Gemini?')) run(S.store.deleteIn('config', 'ia')); },
+  'ai-savemodel': () => { const m = $('#s-aimodel').value.trim(); if (m) run(S.store.saveIn('config', { id: 'ia', modelo: m })).then(() => toast('Guardado')); },
+  'ai-act': (b) => {
+    const m = loadChat()[+b.dataset.m]; if (!m) return;
+    const a = splitActions(m.text).acciones[+b.dataset.j]; if (!a) return;
+    if (a.tipo === 'recordatorio') {
+      const cuando = new Date(a.cuando).getTime();
+      run(S.store.saveIn('agenda', { tipo: 'recordatorio', titulo: a.titulo || 'Recordatorio', cuando: isNaN(cuando) ? Date.now() + DAY : cuando, hecho: false, autor: me(), persona: '' }));
+      toast('Recordatorio añadido a la Agenda');
+    } else {
+      seedTemas();
+      const tema = ['pediatra', 'matrona', 'compras', 'otros'].includes(a.tema) ? a.tema : 'otros';
+      run(S.store.saveIn('notas', { temaId: tema, texto: a.texto || '', hecho: false, t: Date.now(), autor: me() }));
+      toast('Nota añadida');
+    }
+    m.hechas = [...(m.hechas || []), +b.dataset.j]; saveChat(); render();
+  },
+});

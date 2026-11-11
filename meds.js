@@ -3,6 +3,22 @@ const MIN = 60000, HOUR = 3600000, DAY = 86400000;
 const pad = (n) => String(n).padStart(2, '0');
 
 export const PERSONAS = { mama: 'Mamá', bebe: 'Bebé' };
+export const COMIDAS = { desayuno: 'Desayuno', comida: 'Comida', cena: 'Cena' };
+export const HORAS_COMIDAS = { desayuno: '08:30', comida: '14:00', cena: '21:00' };
+
+// Horas de una pauta "con las comidas" según los horarios de comida configurados.
+export function horasDeComidas(comidas, horarios) {
+  const h = { ...HORAS_COMIDAS, ...(horarios || {}) };
+  return (comidas || []).filter((c) => h[c]).map((c) => h[c]).sort();
+}
+// Qué comida corresponde a una dosis (para los avisos: "con la cena").
+export function comidaDe(plan, t) {
+  if (plan.modo !== 'comidas') return '';
+  const d = new Date(t), hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const i = (plan.horas || []).indexOf(hm);
+  const sorted = [...(plan.comidas || [])].sort((a, b) => Object.keys(COMIDAS).indexOf(a) - Object.keys(COMIDAS).indexOf(b));
+  return i >= 0 && sorted[i] ? sorted[i] : '';
+}
 
 export function planEnd(plan) {
   return plan.dias ? plan.inicio + plan.dias * DAY : null;
@@ -22,7 +38,7 @@ export function planSlots(plan, from, to) {
   const out = [];
   const end = planEnd(plan);
   const lim = end ? Math.min(to, end - 1) : to;
-  if (plan.modo === 'horas') {
+  if (plan.modo === 'horas' || plan.modo === 'comidas') {
     const horas = plan.horas || [];
     if (!horas.length) return out;
     const d = new Date(Math.max(from, plan.inicio)); d.setHours(0, 0, 0, 0);
@@ -48,7 +64,7 @@ export function planStatus(plan, logs, now = Date.now()) {
   const end = planEnd(plan);
   if (plan.activo === false) return { estado: 'pausada' };
   const last = logs[0];
-  if (plan.modo !== 'horas' && plan.desdeToma && last) {
+  if (plan.modo === 'intervalo' && plan.desdeToma && last) {
     const next = last.t + (plan.cadaH || 8) * HOUR;
     if (end && next >= end) return { estado: 'terminada' };
     return { estado: next <= now ? 'toca' : 'pendiente', proxima: next };
@@ -73,7 +89,10 @@ function horasDelDia(plan) {
 
 export function describePlan(plan) {
   const hora = (t) => { const d = new Date(t); return `${d.getHours()}:${pad(d.getMinutes())}`; };
-  let s = plan.modo === 'horas'
+  const listaComidas = (plan.comidas || []).map((c) => COMIDAS[c].toLowerCase());
+  let s = plan.modo === 'comidas'
+    ? `Con ${listaComidas.length > 1 ? listaComidas.slice(0, -1).join(', ') + ' y ' + listaComidas.slice(-1) : listaComidas[0] || 'las comidas'}`
+    : plan.modo === 'horas'
     ? `A las ${(plan.horas || []).map((h) => h.replace(/^0/, '')).join(', ')}`
     : `Cada ${String(plan.cadaH).replace('.', ',')} h${plan.desdeToma ? ' desde la última toma' : ` · ${horasDelDia(plan) || `desde las ${hora(plan.inicio)}`}`}`;
   const end = planEnd(plan);

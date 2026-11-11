@@ -89,6 +89,13 @@ async function createFirebaseStore(cfg) {
       return Promise.resolve({ id: ref.id });
     },
     deleteIn: (name, id) => F.deleteDoc(F.doc(db, 'bebes', BABY, name, id)),
+    async getIn(name, id) {
+      const d = await F.getDoc(F.doc(db, 'bebes', BABY, name, id));
+      return d.exists() ? { id: d.id, ...d.data() } : null;
+    },
+    async listIn(name, n = 30) {
+      return docs(await F.getDocs(F.query(F.collection(db, 'bebes', BABY, name), F.orderBy('t', 'desc'), F.limit(n))));
+    },
     async allEvents() {
       return docs(await F.getDocs(F.query(evCol, F.orderBy('t', 'asc'))));
     },
@@ -143,6 +150,8 @@ function createDemoStore() {
       data.cols[name] = list.filter((x) => x.id !== id).concat([{ ...prev, ...d, id }]);
       save(); return { id };
     },
+    getIn: async (name, id) => copy(((data.cols || {})[name] || []).find((x) => x.id === id) || null),
+    listIn: async (name, n = 30) => copy(((data.cols || {})[name] || []).sort((a, b) => b.t - a.t).slice(0, n)),
     deleteIn: async (name, id) => { data.cols = data.cols || {}; data.cols[name] = (data.cols[name] || []).filter((x) => x.id !== id); save(); },
     onSync(cb) { cb({ pending: false, online: true }); },
   };
