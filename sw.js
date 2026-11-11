@@ -1,6 +1,6 @@
 // Service worker: guarda la app para que abra sin conexión.
 // Sube el número de versión al publicar cambios para que los móviles se actualicen.
-const CACHE = 'monitor-bebe-v9';
+const CACHE = 'monitor-bebe-v10';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './store.js', './config.js', './who.js', './voice.js', './meds.js', './ai.js',
   './manifest.webmanifest', './lib/firebase-app.js', './lib/firebase-auth.js', './lib/firebase-firestore.js',
@@ -8,7 +8,7 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -23,7 +23,7 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
   // Red primero (para recibir actualizaciones), caché si no hay conexión.
   e.respondWith(
-    fetch(req)
+    fetch(req, { cache: 'no-cache' }) // siempre comprueba con el servidor si hay versión nueva
       .then((res) => {
         if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
         return res;
