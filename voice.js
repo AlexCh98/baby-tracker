@@ -37,6 +37,9 @@ export function parseCommand(raw) {
   // Deshacer
   if (has(t, 'deshaz', 'deshacer', 'anula', 'borra (lo|el) ultimo', 'me he equivocado')) return { type: 'deshacer' };
 
+  // Tiempo boca abajo: "boca abajo 5 minutos"
+  if (has(t, 'boca abajo', 'barriga', 'tummy')) return { type: 'barriga', min: findNumber(t) };
+
   // Notas: "apunta para el pediatra preguntar por las cacas"
   if (/^(apunta|anota|apuntar|anotar|toma nota|añade|agrega)\b/.test(t)) return { type: 'nota', texto: String(raw).trim() };
   if (has(t, 'cita', 'citas')) return { type: 'q-cita' };

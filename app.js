@@ -2,6 +2,8 @@ import { createStore } from './store.js';
 import { WHO } from './who.js';
 import { PERSONAS, planSlots, planStatus, describePlan, planIcs, parseHoras, COMIDAS, HORAS_COMIDAS, horasDeComidas, comidaDe } from './meds.js';
 import { askGemini, listModels, testConnection } from './ai.js';
+import { AREAS, ACTIVIDADES, CONSEJOS, HITOS, objetivoBarriga, actividadesDelDia } from './develop.js';
+import * as Sonido from './sound.js';
 import { createVoice, voiceSupported, parseCommand, findNumber, norm } from './voice.js';
 
 // ---------------------------------------------------------------- utilidades
@@ -131,7 +133,7 @@ const evTitle = (e) => (e.tipo === 'pecho' && e.lado ? `Pecho · terminó ${LADO
 
 // ---------------------------------------------------------------- estado
 const S = {
-  store: null, user: undefined, baby: null, active: {}, events: [], measures: [], plans: [], agenda: [], temas: [], notas: [], agendaSeg: 'proximo', config: {}, chat: null, aiBusy: false, saludTab: 'medicinas', temaOpen: {},
+  store: null, user: undefined, baby: null, active: {}, events: [], measures: [], plans: [], agenda: [], temas: [], notas: [], agendaSeg: 'proximo', devSeg: 'hoy', estimulos: [], hitos: [], hitoOpen: {}, config: {}, chat: null, aiBusy: false, saludTab: 'medicinas', temaOpen: {},
   tab: 'inicio', filtro: 'todo', rango: 'hoy', medida: 'peso',
   sync: { pending: false, online: true }, error: null, loaded: false, lastAdded: null,
   voice: { enabled: false, state: 'apagado' },
@@ -155,7 +157,7 @@ async function start() {
     unsubs = [];
     S.user = u;
     S.error = null;
-    S.baby = null; S.active = {}; S.events = []; S.measures = []; S.plans = []; S.agenda = []; S.temas = []; S.notas = []; S.loaded = false;
+    S.baby = null; S.active = {}; S.events = []; S.measures = []; S.plans = []; S.agenda = []; S.temas = []; S.notas = []; S.estimulos = []; S.hitos = []; S.loaded = false;
     S.access = !u ? null : S.store.mode === 'demo' || wasVerified(u.email) ? 'ok' : 'checking';
     if (u) subscribe();
     render();
@@ -187,6 +189,8 @@ function subscribe() {
   unsubs.push(S.store.watchCol('agenda', (x) => { S.agenda = x; render(); checkAgendaAlerts(); }, err));
   unsubs.push(S.store.watchCol('temas', (x) => { S.temas = x; S.temasLoaded = true; render(); }, err));
   unsubs.push(S.store.watchCol('notas', (x) => { S.notas = x; render(); }, err));
+  unsubs.push(S.store.watchCol('estimulos', (x) => { S.estimulos = x; render(); }, err));
+  unsubs.push(S.store.watchCol('hitos', (x) => { S.hitos = x; render(); }, err));
   unsubs.push(S.store.watchCol('config', (x) => { S.config = Object.fromEntries(x.map((d) => [d.id, d])); render(); }, err));
 }
 
@@ -226,7 +230,7 @@ function render() {
   dirty = false;
   charts.forEach((c) => c.destroy());
   charts = [];
-  const views = { inicio: viewHome, historial: viewHistory, resumen: viewSummary, crecimiento: () => saludSeg() + viewGrowth(), medicinas: () => saludSeg() + viewMeds(), agenda: viewAgenda, asistente: viewAI, ajustes: viewSettings };
+  const views = { inicio: viewHome, historial: viewHistory, resumen: viewSummary, crecimiento: () => saludSeg() + viewGrowth(), medicinas: () => saludSeg() + viewMeds(), agenda: viewAgenda, desarrollo: viewDev, asistente: viewAI, ajustes: viewSettings };
   const scroll = window.scrollY;
   app.innerHTML = `
     ${header()}
@@ -256,7 +260,7 @@ function header() {
 }
 
 function nav() {
-  const items = [['inicio', '🏠', 'Inicio'], ['historial', '🗒️', 'Registro'], ['resumen', '📊', 'Resumen'], ['salud', '💊', 'Salud'], ['agenda', '📅', 'Agenda']];
+  const items = [['inicio', '🏠', 'Inicio'], ['historial', '🗒️', 'Registro'], ['resumen', '📊', 'Resumen'], ['salud', '💊', 'Salud'], ['desarrollo', '🧸', 'Desarrollo'], ['agenda', '📅', 'Agenda']];
   const on = (k) => S.tab === k || (k === 'salud' && (S.tab === 'medicinas' || S.tab === 'crecimiento'));
   return `<nav class="nav">${items.map(([k, i, l]) => `<button data-action="tab" data-tab="${k}" class="${on(k) ? 'on' : ''}"><span class="i">${i}</span>${l}</button>`).join('')}</nav>`;
 }
@@ -569,6 +573,7 @@ function viewSettings() {
   <div class="card">
     <div class="field"><label>Nombre</label><input class="input" id="s-nombre" value="${esc(b.nombre || '')}" placeholder="Nombre del bebé"></div>
     <div class="field"><label>Fecha y hora de nacimiento</label><input class="input" id="s-nac" type="datetime-local" value="${b.nacimiento ? toLocalInput(b.nacimiento) : ''}"></div>
+    <div class="field"><label>Semanas de gestación al nacer (para la edad corregida si fue prematuro)</label><input class="input" id="s-semanas" inputmode="numeric" value="${b.semanas ?? ''}" placeholder="p. ej. 39"></div>
     <div class="field"><label>Sexo (para las curvas de la OMS)</label>
       <div class="grid2"><button class="opt ${b.sexo === 'nino' ? 'on' : ''}" data-action="pick-sexo" data-v="nino">Niño</button><button class="opt ${b.sexo === 'nina' ? 'on' : ''}" data-action="pick-sexo" data-v="nina">Niña</button></div></div>
     <div class="field"><label>Máximo de horas entre tomas (desde el inicio de una al de la siguiente)</label><input class="input" id="s-maxh" inputmode="decimal" value="${String(b.maxEntreTomas ?? 3).replace('.', ',')}">
@@ -989,7 +994,8 @@ const actions = {
   'save-baby': () => {
     const nombre = $('#s-nombre').value.trim();
     const nac = fromLocalInput($('#s-nac').value);
-    const data = { nombre, medDiaria: $('#s-med').value.trim(), maxEntreTomas: num($('#s-maxh').value) || 3, avisoTomas: $('[data-action="pick-generic"][data-group="s-avisotoma"].on')?.dataset.v === '1' };
+    const semanas = num($('#s-semanas')?.value);
+    const data = { semanas: semanas && semanas >= 22 && semanas <= 44 ? semanas : null, nombre, medDiaria: $('#s-med').value.trim(), maxEntreTomas: num($('#s-maxh').value) || 3, avisoTomas: $('[data-action="pick-generic"][data-group="s-avisotoma"].on')?.dataset.v === '1' };
     if (!isNaN(nac)) data.nacimiento = nac;
     const sexo = S._sexo || S.baby?.sexo;
     if (sexo) data.sexo = sexo;
@@ -1123,6 +1129,12 @@ function sugeridoPecho() {
 function handleIntent(it, v) {
   const say = (t) => v.speak(t);
   if (it.type === 'med-tomada' || it.type === 'q-med') return handleMedIntent(it, v);
+  if (it.type === 'barriga') {
+    const dia = ymd(Date.now()), m = Math.max(1, Math.round(it.min || 3));
+    run(S.store.saveIn('estimulos', { id: `${dia}_barriga`, dia, act: 'barriga', min: barrigaDia(dia) + m, t: Date.now(), autor: me() }));
+    const ed = edadDev();
+    return say(`Sumados ${m} minutos boca abajo. Hoy lleva ${barrigaDia(dia) + m}${ed ? ` de ${objetivoBarriga(ed.dias)}` : ''}`);
+  }
   if (it.type === 'nota') {
     const temas = temasOrdenados();
     const t = norm(it.texto);
@@ -2109,6 +2121,7 @@ Cómo responder:
 - Compara con las pautas generales para recién nacidos (AEP/OMS): 8–12 tomas al día a demanda; no más de unas 3 h entre tomas (de inicio a inicio) las primeras semanas; pérdida de peso normal hasta ~7-10 % los primeros días y recuperar el peso de nacimiento hacia los 10–14 días; después ganancia aproximada de 150–250 g/semana; desde el día 5 aprox. al menos 6 pañales mojados al día y 3–4 cacas o más; cacas: meconio negro los primeros días, transición verdosa, y amarilla/mostaza "grumosa" hacia el día 4-5 en lactancia materna.
 - Si ves señales de alarma, dilo claramente al principio y recomienda llamar al pediatra o ir a urgencias: fiebre ≥ 38 ºC en menores de 3 meses; caca blanca, gris o con sangre; muy pocos pañales mojados; rechazo de tomas o mucho adormilamiento; vómitos en proyectil repetidos o verdes; color amarillo de piel que aumenta; pérdida de peso > 10 %. Para la mamá: fiebre > 38 ºC, sangrado abundante o dolor intenso.
 - No eres médico: no diagnostiques ni cambies dosis de medicación; puedes explicar lo general y sugerir qué preguntar al pediatra o matrona.
+- Sobre el desarrollo: compara los hitos marcados con la lista de los CDC para su edad (corregida si fue prematuro). Recuerda que cada bebé tiene su ritmo y que "sin marcar" no significa que no lo haga. Sugiere actividades concretas de estimulación adaptadas a su edad y anima sin agobiar.
 - Sobre las fotos de pañales: describe color y consistencia que se ve, la evolución en el tiempo y si encaja con lo esperado para la edad. Avisa si algo debe consultarse.
 - Puedes proponer acciones útiles (máximo 3): notas para preguntar al pediatra/matrona, compras o recordatorios. Si propones alguna, añádelas AL FINAL en un bloque exactamente así:
 \`\`\`acciones
@@ -2190,6 +2203,7 @@ function contextoDatos() {
     L.push('\nNOTAS PENDIENTES:');
     for (const { t, p } of temas) L.push(`- ${t.nombre}: ${p.map((n) => n.texto).join(' | ')}`);
   }
+  L.push(contextoDesarrollo());
   return L.join('\n');
 }
 
@@ -2199,6 +2213,7 @@ const QUICK = [
   ['Analiza las fotos de los pañales: color, consistencia y evolución. ¿Es lo esperado para su edad?', '🧷 Analizar pañales'],
   ['Prepárame la lista de preguntas para la próxima visita al pediatra, a partir de los datos y las notas.', '🩺 Preguntas pediatra'],
   ['¿Qué me sugieres apuntar o recordar estos días?', '💡 Sugerencias'],
+  ['¿Cómo va su desarrollo? Mira los hitos, las actividades y el tiempo boca abajo, y sugiéreme qué trabajar esta semana.', '🧸 Desarrollo'],
 ];
 
 function mdLite(text) {
@@ -2381,3 +2396,254 @@ document.addEventListener('change', (ev) => {
   run(S.store.saveIn('config', { id: 'ia', modelo: ev.target.value })).then(() => toast('Modelo guardado'));
   S.aiTest = null;
 });
+
+// ---------------------------------------------------------------- desarrollo: actividades, hitos, música y tarjetas
+const ymd = (t) => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+function edadDev(now = Date.now()) {
+  const nac = S.baby?.nacimiento;
+  if (!nac) return null;
+  const real = Math.max(0, (now - nac) / DAY);
+  const sem = S.baby?.semanas;
+  const corr = sem && sem < 37 ? Math.max(0, real - (40 - sem) * 7) : real;
+  return { real: Math.floor(real), dias: Math.floor(corr), corregida: corr !== real };
+}
+const estimulo = (dia, act) => S.estimulos.find((e) => e.id === `${dia}_${act}`);
+const barrigaDia = (dia) => S.estimulos.find((e) => e.id === `${dia}_barriga`)?.min || 0;
+
+const FOCO = [
+  [0, 30, 'Vínculo, contacto, voz y caras. Sus sentidos se están estrenando: tacto, oído y la vista a corta distancia.'],
+  [30, 90, 'Sonrisa social, seguir con la mirada, primeros gorjeos y sostener la cabeza boca abajo.'],
+  [90, 180, 'Alcanzar y agarrar, risas, voltearse y explorar todo con la boca.'],
+  [180, 270, 'Sentarse, pasar objetos de mano en mano, balbuceo (“mamama”) y entender que las cosas siguen existiendo aunque no las vea.'],
+  [270, 400, 'Ponerse de pie, gestos (adiós, señalar), primeras palabras y juegos de imitación.'],
+];
+
+function viewDev() {
+  const ed = edadDev();
+  let h = `<div class="seg">${[['hoy', '🧸 Hoy'], ['hitos', '🏁 Hitos'], ['musica', '🎵 Música y tarjetas']].map(([k, l]) => `<button class="${S.devSeg === k ? 'on' : ''}" data-action="dev-seg" data-v="${k}">${l}</button>`).join('')}</div>`;
+  if (S.devSeg === 'musica') return h + viewMusica();
+  if (!ed) return h + `<div class="banner warn">Indica la fecha de nacimiento en ⚙️ Ajustes para adaptar las actividades y los hitos a su edad.</div>`;
+  return h + (S.devSeg === 'hitos' ? viewHitos(ed) : viewDevHoy(ed));
+}
+
+function actCard(a, dia) {
+  const st = estimulo(dia, a.id);
+  const [ai, al] = AREAS[a.area];
+  const quien = st && st.autor && st.autor !== me() ? ` · ${esc(st.autor.split('@')[0])}` : '';
+  const noAntes = S.estimulos.filter((e) => e.act === a.id && e.estado === 'no' && e.dia !== dia && e.t > Date.now() - 10 * DAY).length;
+  return `<div class="card act-card ${st ? 'st-' + st.estado : ''}">
+    <div class="act-h"><span class="act-ic">${a.icon}</span><div style="flex:1;min-width:0"><div class="t1">${esc(a.titulo)}</div>
+      <div class="t2"><span class="area-chip">${ai} ${al}</span> · ${esc(a.dur)}</div></div></div>
+    <details><summary>Cómo hacerlo</summary><p>${esc(a.como)}</p><p class="muted"><b>Por qué:</b> ${esc(a.porque)}</p></details>
+    ${noAntes && (!st || st.estado !== 'hecho') ? `<div class="faint" style="font-size:12px;margin:6px 0 0">Otras ${noAntes === 1 ? 'vez' : `${noAntes} veces`} no salió: prueba en otro momento del día, cuando esté despierto y tranquilo.</div>` : ''}
+    <div class="grid2" style="margin-top:10px">
+      <button class="btn ${st?.estado === 'hecho' ? 'c' : ''}" style="--c:var(--ok)" data-action="act-log" data-act="${a.id}" data-dia="${dia}" data-v="hecho">${st?.estado === 'hecho' ? '✓ Hecho' + quien : '✓ Hecho'}</button>
+      <button class="btn ${st?.estado === 'no' ? 'c' : ''}" style="--c:var(--warn)" data-action="act-log" data-act="${a.id}" data-dia="${dia}" data-v="no">${st?.estado === 'no' ? 'No ha salido' + quien : 'No hemos podido'}</button>
+    </div></div>`;
+}
+
+function viewDevHoy(ed) {
+  const now = Date.now(), dia = ymd(now);
+  const { hoy, todas } = actividadesDelDia(ed.dias, dia);
+  const sem = Math.floor(ed.dias / 7) + 1;
+  const foco = FOCO.find(([a, b]) => ed.dias >= a && ed.dias < b)?.[2] || '';
+  const cons = CONSEJOS.filter((c) => ed.dias >= c.min && ed.dias <= c.max);
+  const consejo = cons.length ? cons[Math.floor(now / DAY) % cons.length].texto : '';
+  const obj = objetivoBarriga(ed.dias), hechos = barrigaDia(dia);
+  const run2 = S.active.barriga;
+  let h = `<div class="card">
+    <div class="muted" style="font-size:13px">Día ${ed.real} de vida · semana ${sem}${ed.corregida ? ` (edad corregida: ${ed.dias} días)` : ''}</div>
+    <div style="margin-top:6px;font-size:15px"><b>Ahora se trabaja:</b> ${esc(foco)}</div>
+    ${consejo ? `<div class="tip">💡 ${esc(consejo)}</div>` : ''}
+  </div>`;
+
+  // Tiempo boca abajo
+  h += `<div class="card">
+    <div class="act-h"><span class="act-ic">🐢</span><div style="flex:1"><div class="t1">Tiempo boca abajo hoy</div>
+      <div class="t2">${nf(hechos)} de ${obj} min · ${ed.dias < 14 ? '2-3 ratitos de 3-5 min' : ed.dias < 60 ? `hacia 15-30 min al día a los 2 meses` : 'al menos 30 min al día, repartidos'}</div></div></div>
+    <div class="bar"><i style="width:${Math.min(100, (hechos / obj) * 100)}%"></i></div>
+    ${run2 ? `<div class="big-timer" style="font-size:36px;margin:10px 0" data-timer="barriga">00:00</div>
+      <button class="btn c block" style="--c:var(--ok)" data-action="barriga-stop">■ Terminar y sumar</button>`
+    : `<div class="chip-row" style="margin-top:10px">${[1, 3, 5, 10].map((m) => `<button class="chip" data-action="barriga-add" data-m="${m}">+${m} min</button>`).join('')}<button class="chip" data-action="barriga-add" data-m="-1">−1</button></div>
+      <button class="btn block" style="margin-top:10px" data-action="barriga-start">▶ Cronometrar</button>`}
+    <div class="faint" style="font-size:12px;margin-top:8px">Siempre despierto y vigilado, sobre una superficie firme. Si le cuesta, empieza sobre tu pecho.</div>
+  </div>`;
+
+  h += `<div class="section-title">Actividades de hoy</div>`;
+  h += hoy.map((a) => actCard(a, dia)).join('');
+  const resto = todas.filter((a) => !hoy.includes(a));
+  if (resto.length) {
+    h += `<div class="section-title">Más ideas para su edad <button data-action="dev-todas">${S.devTodas ? 'Ocultar' : `Ver ${resto.length}`}</button></div>`;
+    if (S.devTodas) h += resto.map((a) => actCard(a, dia)).join('');
+  }
+
+  // Semana
+  let strip = '';
+  for (let i = 6; i >= 0; i--) {
+    const t = now - i * DAY, d = ymd(t);
+    const logs = S.estimulos.filter((e) => e.dia === d && e.act && e.act !== 'barriga');
+    const ok = logs.filter((e) => e.estado === 'hecho').length, no = logs.filter((e) => e.estado === 'no').length;
+    const bm = barrigaDia(d), eD = edadDev(t);
+    const objD = eD ? objetivoBarriga(eD.dias) : obj;
+    strip += `<div class="wk"><div class="faint">${i === 0 ? 'Hoy' : DIAS[new Date(t).getDay()].slice(0, 2)}</div>
+      <div class="wk-n" style="color:${ok ? 'var(--ok)' : 'var(--faint)'}">${ok}</div>
+      <div class="faint" style="font-size:10px">${no ? `${no} no` : '&nbsp;'}</div>
+      <div class="wk-b"><i style="height:${Math.min(100, (bm / objD) * 100)}%"></i></div><div class="faint" style="font-size:10px">${bm}′</div></div>`;
+  }
+  h += `<div class="section-title">Última semana</div><div class="card"><div class="week">${strip}</div>
+    <div class="legend"><span><b style="color:var(--ok)">n</b> actividades hechas</span><span><span class="dot" style="background:var(--c-medida)"></span>min boca abajo</span></div></div>`;
+  return h;
+}
+
+function hitoEstado(id) { return S.hitos.find((x) => x.id === id); }
+function viewHitos(ed) {
+  const mesDias = (m) => Math.round(m * 30.4375);
+  let h = `<div class="banner info" style="font-size:13px">Los hitos de 2 a 12 meses son los de los CDC: lo que hacen <b>al menos 3 de cada 4 bebés</b> a esa edad. Cada bebé lleva su ritmo; si algo no lo hace al llegar a esa edad, coméntalo con el pediatra.${ed.corregida ? ` Se usa la edad corregida (${ed.dias} días).` : ''}</div>`;
+  for (const cp of HITOS) {
+    const due = mesDias(cp.mes);
+    const items = cp.items;
+    const si = items.filter((i) => hitoEstado(i.id)?.estado === 'si').length;
+    const pend = items.filter((i) => hitoEstado(i.id)?.estado !== 'si');
+    const fase = ed.dias >= due + 30 ? 'pasado' : ed.dias >= due - 45 ? 'ahora' : 'futuro';
+    const open = S.hitoOpen[cp.mes] ?? (fase === 'ahora' || (fase === 'pasado' && pend.length > 0 && ed.dias < due + 120));
+    const tarde = fase === 'pasado' && pend.length;
+    (S._hitoDef ||= {})[cp.mes] = open;
+    h += `<div class="card hito-cp">
+      <button class="tema-t" data-action="hito-toggle" data-m="${cp.mes}" style="width:100%">
+        <b>${cp.mes} ${cp.mes === 1 ? 'mes' : 'meses'}</b>${cp.orientativo ? ' <span class="faint" style="font-size:12px">(orientativo)</span>' : ''}
+        <span class="pill ${fase}">${fase === 'pasado' ? 'Pasado' : ed.dias >= due ? 'Ahora' : `en ${Math.max(1, Math.round((due - ed.dias) / 7))} sem`}</span>
+        <span class="faint" style="margin-left:auto">${si}/${items.length} ${open ? '▾' : '▸'}</span></button>
+      <div class="bar" style="margin-top:8px"><i style="width:${(si / items.length) * 100}%"></i></div>
+      ${tarde && open ? `<div class="hint" style="margin-top:10px">Ya ha pasado la edad de este grupo y hay ${pl(pend.length, 'hito', 'hitos')} sin marcar. Puede que simplemente no lo hayáis apuntado; si no lo hace, coméntalo con el pediatra.
+        <button class="btn block" style="margin-top:8px" data-action="hito-pediatra" data-m="${cp.mes}">＋ Añadir a preguntas del pediatra</button></div>` : ''}
+      ${open ? items.map((it) => {
+        const st = hitoEstado(it.id);
+        const [ai] = AREAS[it.area];
+        return `<div class="hito"><div class="hito-t">${ai} ${esc(it.texto)}${st?.estado === 'si' && st.t ? `<div class="faint" style="font-size:12px">Desde el ${new Date(st.t).getDate()}/${new Date(st.t).getMonth() + 1}</div>` : ''}</div>
+          <div class="hito-b">${[['no', 'Aún no'], ['aveces', 'A veces'], ['si', '¡Sí!']].map(([v, l]) => `<button class="${(st?.estado || '') === v ? 'on ' + v : ''}" data-action="hito-set" data-id="${it.id}" data-v="${v}">${l}</button>`).join('')}</div></div>`;
+      }).join('') : ''}
+    </div>`;
+  }
+  return h;
+}
+
+function viewMusica() {
+  const est = Sonido.estado();
+  const sel = S.musicaMin ?? 30;
+  let h = `<div class="card">
+    <div class="t1" style="margin-bottom:8px">🎵 Nanas y sonidos relajantes</div>
+    <div class="snd-grid">${Sonido.SONIDOS.map((x) => `<button class="snd ${est.playing === x.id ? 'on' : ''}" data-action="snd-play" data-id="${x.id}"><span>${x.icon}</span>${esc(x.titulo)}</button>`).join('')}</div>
+    <div class="field" style="margin-top:12px"><label>Apagar a los</label>${pickPlain2('snd-min', String(sel), [['15', '15 min'], ['30', '30 min'], ['60', '1 h'], ['0', 'Nunca']])}</div>
+    <div class="field"><label>Volumen</label><input type="range" id="snd-vol" min="0.05" max="1" step="0.05" value="${est.volumen}" style="width:100%"></div>
+    ${est.playing ? `<button class="btn primary block" data-action="snd-stop">■ Parar${est.endAt ? ` (se apaga a las ${fmtTime(est.endAt)})` : ''}</button>` : ''}
+    <div class="faint" style="font-size:12px;margin-top:10px">Volumen bajo y el móvil a más de 2 metros de la cuna. Generado en el móvil, funciona sin internet. Con la pantalla bloqueada puede pararse en algunos móviles.</div>
+  </div>`;
+  h += `<div class="section-title">Tarjetas de alto contraste <button data-action="cards-print">🖨️ Imprimir</button></div>
+    <div class="banner info" style="font-size:13px">Para 0-4 meses. Mejor <b>impresas</b> (la OMS no recomienda pantallas antes del año): ponlas a 20-30 cm de su cara o junto al cambiador. Si las enseñas en el móvil, que sean solo un momento.</div>
+    <div class="cards">${Sonido.TARJETAS.map((t) => `<button class="tcard" data-action="card-open" data-id="${t.id}">${Sonido.tarjetaSvg(t)}<span>${esc(t.titulo)}</span></button>`).join('')}</div>`;
+  return h;
+}
+Sonido.onChange(() => { if (S.tab === 'desarrollo' && S.devSeg === 'musica') render(); });
+
+function openCard(id) {
+  const i0 = Sonido.TARJETAS.findIndex((t) => t.id === id);
+  let i = i0 < 0 ? 0 : i0;
+  const d = document.createElement('div');
+  d.className = 'viewer cardview';
+  const show = () => { d.innerHTML = `<div class="cv">${Sonido.tarjetaSvg(Sonido.TARJETAS[i])}</div><div class="cap">${esc(Sonido.TARJETAS[i].titulo)} · toca a los lados para cambiar</div><button class="viewer-x" aria-label="Cerrar">✕</button>`; };
+  show();
+  d.addEventListener('click', (ev) => {
+    if (ev.target.closest('.viewer-x')) return d.remove();
+    i = (i + (ev.clientX > window.innerWidth / 2 ? 1 : -1) + Sonido.TARJETAS.length) % Sonido.TARJETAS.length; show();
+  });
+  document.body.appendChild(d);
+}
+
+function printCards() {
+  let pr = $('#print-area');
+  if (!pr) { pr = document.createElement('div'); pr.id = 'print-area'; document.body.appendChild(pr); }
+  pr.innerHTML = Sonido.TARJETAS.map((t) => `<div class="pcard">${Sonido.tarjetaSvg(t, '90%')}</div>`).join('');
+  setTimeout(() => window.print(), 100);
+}
+
+Object.assign(actions, {
+  'dev-seg': (b) => { S.devSeg = b.dataset.v; render(); },
+  'dev-todas': () => { S.devTodas = !S.devTodas; render(); },
+  'act-log': (b) => {
+    const { act, dia, v } = b.dataset, id = `${dia}_${act}`;
+    const cur = estimulo(dia, act);
+    vibrate();
+    if (cur && cur.estado === v) run(S.store.deleteIn('estimulos', id));
+    else run(S.store.saveIn('estimulos', { id, dia, act, estado: v, t: Date.now(), autor: me() }));
+    if (v === 'hecho' && !(cur && cur.estado === v)) toast('¡Bien hecho! 👏');
+  },
+  'barriga-add': (b) => {
+    const dia = ymd(Date.now()), m = Math.max(0, barrigaDia(dia) + +b.dataset.m);
+    vibrate();
+    run(S.store.saveIn('estimulos', { id: `${dia}_barriga`, dia, act: 'barriga', min: m, t: Date.now(), autor: me() }));
+  },
+  'barriga-start': () => { vibrate(); run(S.store.saveState({ barriga: { inicio: Date.now(), autor: me() } })); },
+  'barriga-stop': () => {
+    const r = S.active.barriga; if (!r) return;
+    const m = Math.max(1, Math.round((Date.now() - r.inicio) / MIN));
+    const dia = ymd(r.inicio);
+    run(S.store.saveIn('estimulos', { id: `${dia}_barriga`, dia, act: 'barriga', min: barrigaDia(dia) + m, t: Date.now(), autor: me() }));
+    run(S.store.saveState({ barriga: null }));
+    toast(`+${m} min boca abajo`);
+  },
+  'hito-toggle': (b) => { const m = +b.dataset.m; S.hitoOpen[m] = !(S.hitoOpen[m] ?? S._hitoDef?.[m] ?? false); render(); },
+  'hito-set': (b) => {
+    const { id, v } = b.dataset, cur = hitoEstado(id);
+    vibrate();
+    if (cur && cur.estado === v) run(S.store.deleteIn('hitos', id));
+    else run(S.store.saveIn('hitos', { id, estado: v, t: v === 'si' ? (cur?.estado === 'si' ? cur.t : Date.now()) : Date.now(), autor: me() }));
+    if (v === 'si' && cur?.estado !== 'si') toast('🎉 ¡Nuevo hito!');
+  },
+  'hito-pediatra': (b) => {
+    const cp = HITOS.find((x) => x.mes === +b.dataset.m); if (!cp) return;
+    seedTemas();
+    const pend = cp.items.filter((i) => hitoEstado(i.id)?.estado !== 'si');
+    const ya = new Set(S.notas.map((n) => n.texto));
+    let n = 0;
+    for (const it of pend) {
+      const texto = `Hito de los ${cp.mes} meses que aún no hace: ${it.texto.toLowerCase()}`;
+      if (!ya.has(texto)) { S.store.saveIn('notas', { temaId: 'pediatra', texto, hecho: false, t: Date.now(), autor: me() }); n++; }
+    }
+    toast(n ? `${pl(n, 'pregunta añadida', 'preguntas añadidas')} al pediatra` : 'Ya estaban en las preguntas del pediatra');
+  },
+  'snd-play': (b) => {
+    if (Sonido.estado().playing === b.dataset.id) return Sonido.stop();
+    const m = +($('[data-action="pick-generic"][data-group="snd-min"].on')?.dataset.v ?? 30);
+    S.musicaMin = m;
+    Sonido.play(b.dataset.id, m || null);
+  },
+  'snd-stop': () => Sonido.stop(),
+  'card-open': (b) => openCard(b.dataset.id),
+  'cards-print': () => printCards(),
+});
+document.addEventListener('input', (ev) => { if (ev.target.id === 'snd-vol') Sonido.setVolumen(+ev.target.value); });
+
+// Cronómetro de tiempo boca abajo
+setInterval(() => {
+  const r = S.active.barriga; if (!r) return;
+  const el = document.querySelector('[data-timer="barriga"]'); if (el) el.textContent = fmtClock(Date.now() - r.inicio);
+}, 1000);
+
+// Resumen de desarrollo para el asistente IA
+function contextoDesarrollo() {
+  const ed = edadDev(); if (!ed) return '';
+  const L = ['\nDESARROLLO:'];
+  L.push(`Edad para desarrollo: ${ed.dias} días${ed.corregida ? ' (corregida por prematuridad)' : ''}.`);
+  for (const cp of HITOS) {
+    if (cp.mes * 30.4 > ed.dias + 60) continue;
+    const by = { si: [], aveces: [], no: [], sin: [] };
+    for (const it of cp.items) by[hitoEstado(it.id)?.estado || 'sin'].push(it.texto);
+    L.push(`- Hitos ${cp.mes} m${cp.orientativo ? ' (orientativos)' : ' (CDC)'}: lo hace: ${by.si.join('; ') || '—'} | a veces: ${by.aveces.join('; ') || '—'} | aún no: ${by.no.join('; ') || '—'} | sin marcar: ${by.sin.length}`);
+  }
+  const d7 = []; for (let i = 6; i >= 0; i--) d7.push(ymd(Date.now() - i * DAY));
+  const logs = S.estimulos.filter((e) => d7.includes(e.dia) && e.act !== 'barriga');
+  const tit = (id) => ACTIVIDADES.find((a) => a.id === id)?.titulo || id;
+  L.push(`- Actividades últimos 7 días: hechas ${logs.filter((e) => e.estado === 'hecho').map((e) => tit(e.act)).join(', ') || 'ninguna'}; no salieron: ${logs.filter((e) => e.estado === 'no').map((e) => tit(e.act)).join(', ') || 'ninguna'}.`);
+  L.push(`- Minutos boca abajo por día (últimos 7): ${d7.map((d) => barrigaDia(d)).join(', ')} (objetivo actual ${objetivoBarriga(ed.dias)} min/día).`);
+  return L.join('\n');
+}

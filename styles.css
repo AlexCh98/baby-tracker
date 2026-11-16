@@ -374,3 +374,53 @@ label.btn { cursor: pointer; }
 .grid2 > *, .grid3 > * { min-width: 0; }
 input.input[type="time"], input.input[type="date"], input.input[type="datetime-local"] { min-width: 0; max-width: 100%; }
 main { overflow-x: clip; }
+
+/* Desarrollo */
+.tip { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: #8b9cff14; font-size: 14px; color: #cdd4ff; }
+.act-h { display: flex; gap: 12px; align-items: center; }
+.act-ic { width: 42px; height: 42px; border-radius: 14px; display: grid; place-items: center; font-size: 22px; background: var(--card-2); flex: none; }
+.act-card .t1, .card .t1 { font-weight: 600; font-size: 16px; }
+.act-card .t2 { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.area-chip { white-space: nowrap; }
+.act-card details { margin-top: 10px; font-size: 14px; }
+.act-card summary { color: var(--accent); cursor: pointer; }
+.act-card details p { margin: 8px 0 0; }
+.act-card.st-hecho { border-color: #5fd3a866; }
+.act-card.st-no { border-color: #ffb86b55; }
+.bar { height: 8px; background: var(--bg-2); border-radius: 99px; overflow: hidden; margin-top: 10px; }
+.bar i { display: block; height: 100%; background: var(--c-medida); border-radius: 99px; }
+.week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; text-align: center; font-size: 12px; }
+.wk-n { font-size: 20px; font-weight: 700; }
+.wk-b { height: 40px; width: 12px; margin: 4px auto 2px; background: var(--bg-2); border-radius: 6px; position: relative; overflow: hidden; }
+.wk-b i { position: absolute; left: 0; right: 0; bottom: 0; background: var(--c-medida); }
+.pill { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 99px; background: var(--card-2); color: var(--muted); }
+.pill.ahora { background: #8b9cff33; color: var(--accent); }
+.pill.pasado { background: #5fd3a822; color: var(--ok); }
+.hito { padding: 10px 0; border-top: 1px solid var(--line); }
+.hito:first-of-type { margin-top: 10px; }
+.hito-t { font-size: 15px; }
+.hito-b { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+.hito-b button { padding: 8px 4px; border-radius: 10px; background: var(--bg-2); border: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+.hito-b button.on.no { border-color: var(--danger); color: var(--danger); }
+.hito-b button.on.aveces { border-color: var(--warn); color: var(--warn); }
+.hito-b button.on.si { background: var(--ok); border-color: var(--ok); color: #06261b; font-weight: 700; }
+.snd-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.snd { display: flex; align-items: center; gap: 8px; text-align: left; padding: 12px; border-radius: 14px; background: var(--bg-2); border: 1px solid var(--line); font-size: 14px; }
+.snd span { font-size: 20px; }
+.snd.on { border-color: var(--accent); background: #8b9cff22; }
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.tcard { border-radius: 12px; overflow: hidden; background: #fff; display: flex; flex-direction: column; }
+.tcard svg { display: block; aspect-ratio: 1; }
+.tcard span { background: var(--card); color: var(--muted); font-size: 11px; padding: 5px 4px; }
+.cardview { background: #fff; }
+.cardview .cv { width: min(92vw, 80dvh); }
+.cardview .cap { color: #555; }
+.cardview .viewer-x { background: #0002; color: #111; }
+#print-area { display: none; }
+@media print {
+  body > *:not(#print-area) { display: none !important; }
+  #print-area { display: block !important; }
+  .pcard { height: 48vh; display: grid; place-items: center; page-break-inside: avoid; }
+  .pcard svg { max-height: 46vh; }
+  html, body { background: #fff !important; }
+}
